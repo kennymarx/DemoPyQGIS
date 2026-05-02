@@ -1,13 +1,35 @@
 import math
+import os
 import sys
 
 from PyQt5.QtCore import QMetaType
 from PyQt5.QtGui import QColor
+
+# 初始化qgis环境，固定写法
+_conda_prefix = sys.prefix
+        
+_qgis_python = os.path.join(_conda_prefix, "Library", "python")
+if _qgis_python not in sys.path:
+    sys.path.insert(0, _qgis_python)
+        
+_qgis_bin = os.path.join(_conda_prefix, "Library", "bin")
+os.environ["PATH"] = _qgis_bin + os.pathsep + os.environ.get("PATH", "")
+
+if hasattr(os, "add_dll_directory"):
+    os.add_dll_directory(_qgis_bin)
+
 from qgis.core import *
+qgis_prefix = os.path.join(_conda_prefix, "Library")
+QgsApplication.setPrefixPath(qgis_prefix, True)
+        
+qgs_app = QgsApplication([], False)
+qgs_app.initQgis()
 
+# 设置qgis项目路径
+# C:\Users\Administrator\Desktop\QGIS\qgis笔记\QGIS开发\projectTest\project4
+# projectPath = r'C:\Users\Administrator\Desktop\QGIS\qgis笔记\QGIS开发\projectTest\makeMapExtentShp'
+projectPath = r'C:\Users\Administrator\Desktop\QGIS\projectTest\makeMapExtentShp'
 
-# 设置qgis项目路径，C:\Users\Administrator\Desktop\QGIS\qgis笔记\QGIS开发\projectTest\project4
-projectPath = r'C:\Users\Administrator\Desktop\QGIS\qgis笔记\QGIS开发\projectTest\makeMapExtentShp'
 project = QgsProject.instance()
 
 # 设置项目的坐标系wsg84
