@@ -21,6 +21,9 @@ wmts_url = f'http://t0.tianditu.gov.cn/img_w/wmts?tk={tk}'
 # 创建WMTS客户端
 wmts = WebMapTileService(url=wmts_url,headers=headers)
 
+print(wmts_url)
+print(headers)
+
 # 打印可用图层信息
 print("可用图层:")
 for layer in wmts.contents:
@@ -46,8 +49,10 @@ os.makedirs(output_dir, exist_ok=True)
 
 # 北京地区的经纬度范围
 # wgs 84 EPSG:4326
-lon_min, lon_max = 116.2, 116.6
-lat_min, lat_max = 39.7, 40.1
+# lon_min, lon_max = 116.2, 116.6
+lon_min, lon_max = 116.2, 116.3
+# lat_min, lat_max = 39.7, 40.1
+lat_min, lat_max = 39.7, 39.8
 
 
 # 将经纬度转换为瓦片坐标
@@ -108,6 +113,7 @@ for x in range(x_min, x_max + 1):
                 #tk={tk}
             )
 
+            print(wmts_url)
             # 保存瓦片
             filename = os.path.join(output_dir, f'tile_{zoom_level}_{x}_{y}.jpg')
             with open(filename, 'wb') as f:

@@ -5,6 +5,20 @@ import shutil
 from PyQt5.QtCore import QMetaType
 
 
+TIANDITU_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+    'Referer': 'https://www.yourdomain.com/',
+    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+    'Accept-Encoding': 'gzip, deflate',
+    'Connection': 'keep-alive'
+}
+
+
+
+TIANDITU_TK = 'a96ffd6582a7a7e32c0084d79f7976e182'
+TIANDITU_WMTS_URL = f'http://t0.tianditu.gov.cn/img_w/wmts?tk={TIANDITU_TK}'
+
+
 class DemMakeQGISHeadless:
     def __init__(self, center_longitude, center_latitude, side_length_km, project_path):
         if side_length_km > 10:
@@ -199,6 +213,170 @@ class DemMakeQGISHeadless:
             transform_context,
             options
         )
+    
+    def _check_gpkg_exists(self):
+        gpkg_path = os.path.join(self.project_path, "地图范围.gpkg")
+        return os.path.exists(gpkg_path)
+    
+    def _get_gpkg_extent(self):
+        from qgis.core import QgsVectorLayer
+        gpkg_path = os.path.join(self.project_path, "地图范围.gpkg")
+        layer = QgsVectorLayer(gpkg_path, "temp", "ogr")
+        if not layer.isValid():
+            raise RuntimeError("加载gpkg文件失败")
+        extent = layer.extent()
+        return {
+            'lon_min': extent.xMinimum(),
+            'lon_max': extent.xMaximum(),
+            'lat_min': extent.yMinimum(),
+            'lat_max': extent.yMaximum()
+        }
+    
+    def _deg2num(self, lat_deg, lon_deg, zoom):
+        lat_rad = math.radians(lat_deg)
+        n = 2.0 ** zoom
+        xtile = int((lon_deg + 180.0) / 360.0 * n)
+        ytile = int((1.0 - math.asinh(math.tan(lat_rad)) / math.pi) / 2.0 * n)
+        return (xtile, ytile)
+    
+    def _num2deg(self, xtile, ytile, zoom):
+        n = 2.0 ** zoom
+        lon_deg = xtile / n * 360.0 - 180.0
+        lat_rad = math.atan(math.sinh(math.pi * (1 - 2 * ytile / n)))
+        lat_deg = math.degrees(lat_rad)
+        return (lat_deg, lon_deg)
+    
+    def _download_tianditu_tiles(self, lon_min, lon_max, lat_min, lat_max, zoom_level=14):
+        from owslib.wmts import WebMapTileService
+        from PIL import Image
+        from osgeo import gdal
+        from pyproj import Transformer
+        
+        print(TIANDITU_WMTS_URL)
+
+        wmts = WebMapTileService(url=TIANDITU_WMTS_URL, headers=TIANDITU_HEADERS)
+
+        print("test1")
+        
+        layer_name = 'img'
+        tile_matrix_set = 'w'
+        
+        x_min, y_min = self._deg2num(lat_max, lon_min, zoom_level)
+        x_max, y_max = self._deg2num(lat_min, lon_max, zoom_level)
+        
+        tile_output_dir = os.path.join(self.project_path, 'tianditu_tiles')
+        os.makedirs(tile_output_dir, exist_ok=True)
+        
+        total_tiles = (x_max - x_min + 1) * (y_max - y_min + 1)
+        count = 0
+        print(f"\n开始下载瓦片 (级别: {zoom_level})...")
+        print(f"瓦片列范围: {x_min} 到 {x_max}")
+        print(f"瓦片行范围: {y_min} 到 {y_max}")
+        
+        for x in range(x_min, x_max + 1):
+            for y in range(y_min, y_max + 1):
+                try:
+                    tile = wmts.gettile(
+                        base_url=TIANDITU_WMTS_URL,
+                        layer=layer_name,
+                        tilematrixset=tile_matrix_set,
+                        tilematrix=str(zoom_level),
+                        row=y,
+                        column=x,
+                    )
+                    
+                
+                    filename = os.path.join(tile_output_dir, f'tile_{zoom_level}_{x}_{y}.jpg')
+                    with open(filename, 'wb') as f:
+                        f.write(tile.read())
+                    count += 1
+                    print(f"已下载 {count}/{total_tiles} 瓦片: {filename}")
+                except Exception as e:
+                    print(f"下载失败 ({x},{y}): {str(e)}")
+        
+        print(f"\n瓦片下载完成! 共下载 {count} 个瓦片")
+        
+        return self._merge_tiles(tile_output_dir, zoom_level, (x_min, x_max), (y_min, y_max), lon_min, lon_max, lat_min, lat_max)
+    
+    def _merge_tiles(self, tile_output_dir, zoom, x_range, y_range, lon_min, lon_max, lat_min, lat_max):
+        from PIL import Image
+        from osgeo import gdal
+        from pyproj import Transformer
+        
+        tile_width = 256
+        tile_height = 256
+        width = (x_range[1] - x_range[0] + 1) * tile_width
+        height = (y_range[1] - y_range[0] + 1) * tile_height
+        
+        merged = Image.new('RGB', (width, height))
+        
+        print("\n开始拼接瓦片...")
+        for x in range(x_range[0], x_range[1] + 1):
+            for y in range(y_range[0], y_range[1] + 1):
+                try:
+                    tile_path = os.path.join(tile_output_dir, f'tile_{zoom}_{x}_{y}.jpg')
+                    tile_img = Image.open(tile_path)
+                    pos_x = (x - x_range[0]) * tile_width
+                    pos_y = (y - y_range[0]) * tile_height
+                    merged.paste(tile_img, (pos_x, pos_y))
+                except Exception as e:
+                    print(f"拼接失败 ({x},{y}): {str(e)}")
+        
+        temp_jpg = os.path.join(self.project_path, 'tianditu_temp.jpg')
+        merged.save(temp_jpg)
+        print(f"\n拼接完成! 临时图像保存至: {temp_jpg}")
+        
+        transformer = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
+        _, tile_y_min = self._num2deg(x_range[0], y_range[1] + 1, zoom)
+        _, tile_y_max = self._num2deg(x_range[0], y_range[0], zoom)
+        tile_x_min, _ = self._num2deg(x_range[0], y_range[0], zoom)
+        tile_x_max, _ = self._num2deg(x_range[1] + 1, y_range[0], zoom)
+        
+        x_min_3857, y_min_3857 = transformer.transform(tile_x_min, tile_y_min)
+        x_max_3857, y_max_3857 = transformer.transform(tile_x_max, tile_y_max)
+        
+        gcp_list = [
+            gdal.GCP(x_min_3857, y_max_3857, 0, 0, 0),
+            gdal.GCP(x_max_3857, y_max_3857, 0, merged.width, 0),
+            gdal.GCP(x_min_3857, y_min_3857, 0, 0, merged.height),
+            gdal.GCP(x_max_3857, y_min_3857, 0, merged.width, merged.height)
+        ]
+        
+        options = gdal.TranslateOptions(format='GTiff', outputSRS='EPSG:3857', GCPs=gcp_list)
+        tif_path = os.path.join(self.project_path, '地图范围-天地图.tif')
+        gdal.Translate(tif_path, temp_jpg, options=options)
+        print(f"GeoTIFF保存至: {tif_path}")
+        
+        if os.path.exists(temp_jpg):
+            os.remove(temp_jpg)
+        
+        return tif_path
+    
+    def _add_tif_to_project(self, tif_path):
+        from qgis.core import QgsRasterLayer
+        raster_layer = QgsRasterLayer(tif_path, '地图范围-天地图')
+        if not raster_layer.isValid():
+            raise RuntimeError(f"加载TIF文件失败: {tif_path}")
+        self.project.addMapLayer(raster_layer, False)
+        root = self.project.layerTreeRoot()
+        root.insertLayer(0, raster_layer)
+        print(f"已添加图层到项目: {tif_path}")
+    
+    def download_and_add_tianditu(self, zoom_level=14):
+        if not self._check_gpkg_exists():
+            raise RuntimeError("地图范围.gpkg不存在，请先创建")
+        print("\n=== 开始下载天地图影像 ===")
+        extent = self._get_gpkg_extent()
+        tif_path = self._download_tianditu_tiles(
+            extent['lon_min'],
+            extent['lon_max'],
+            extent['lat_min'],
+            extent['lat_max'],
+            zoom_level
+        )
+        self._add_tif_to_project(tif_path)
+        print("\n=== 天地图下载完成 ===")
+        return tif_path
 
 
 if __name__ == "__main__":
@@ -227,7 +405,26 @@ if __name__ == "__main__":
         project_path = maker.save_project()
         
         print(f"项目已保存到: {project_path}")
-        print("\n测试完成!")
+        
+        print("\n=== 开始天地图下载验证 ===")
+        if maker._check_gpkg_exists():
+            print("地图范围.gpkg存在，开始下载天地图...")
+            tif_path = maker.download_and_add_tianditu(zoom_level=14)
+            
+            if os.path.exists(tif_path):
+                print(f"验证成功: 地图范围-天地图.tif 已创建!")
+                print(f"文件大小: {os.path.getsize(tif_path)} bytes")
+                
+                print("\n重新保存项目...")
+                final_project_path = maker.save_project()
+                print(f"最终项目已保存到: {final_project_path}")
+            else:
+                print("验证失败: 地图范围-天地图.tif 未创建!")
+        else:
+            print("验证失败: 地图范围.gpkg 不存在!")
+        
+        print("\n=== 所有测试完成 ===")
+        
     except Exception as e:
         print(f"测试失败: {e}")
         import traceback
