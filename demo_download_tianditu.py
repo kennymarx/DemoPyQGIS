@@ -113,7 +113,7 @@ for x in range(x_min, x_max + 1):
                 #tk={tk}
             )
 
-            print(wmts_url)
+            # print(wmts_url)
             # 保存瓦片
             filename = os.path.join(output_dir, f'tile_{zoom_level}_{x}_{y}.jpg')
             with open(filename, 'wb') as f:
@@ -177,11 +177,11 @@ merged_img = merge_tiles(
 # merged_img.show()
 
 # merged_img的像素列坐标
-print(merged_img.width)
+print(f'merged_img的像素列坐标:{merged_img.width}')
 # merged_img的像素行坐标
-print(merged_img.height)
+print(f'merged_img的像素行坐标:{merged_img.height}')
 # 图像尺寸
-print(merged_img.size)
+print(f'merged_img的图像尺寸:{merged_img.size}')
 
 # 转换成GeoTIFF
 
@@ -190,6 +190,10 @@ transformer = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
 x_min_3857, y_min_3857 = transformer.transform(lon_min, lat_min)
 x_max_3857, y_max_3857 = transformer.transform(lon_max, lat_max)
 #
+
+# 消除警告 + 明确开启异常（推荐）
+gdal.UseExceptions()
+
 '''
 gdal.GCP(x, y, z, pixel, line)
 x: 地面控制点的经度坐标 (目标坐标系，如 EPSG:4326)

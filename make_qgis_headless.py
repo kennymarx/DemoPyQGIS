@@ -13,9 +13,7 @@ TIANDITU_HEADERS = {
     'Connection': 'keep-alive'
 }
 
-
-
-TIANDITU_TK = 'a96ffd6582a7a7e32c0084d79f7976e182'
+TIANDITU_TK = 'a96ffd6582a7e32c0084d79f7976e182'
 TIANDITU_WMTS_URL = f'http://t0.tianditu.gov.cn/img_w/wmts?tk={TIANDITU_TK}'
 
 
@@ -252,11 +250,11 @@ class DemMakeQGISHeadless:
         from osgeo import gdal
         from pyproj import Transformer
         
-        print(TIANDITU_WMTS_URL)
-
+        print(f"TIANDITU_WMTS_URL: {TIANDITU_WMTS_URL}")
+        # 创建WMTS客户端
         wmts = WebMapTileService(url=TIANDITU_WMTS_URL, headers=TIANDITU_HEADERS)
 
-        print("test1")
+        print("创建WMTS客户端 成功")
         
         layer_name = 'img'
         tile_matrix_set = 'w'
@@ -316,9 +314,12 @@ class DemMakeQGISHeadless:
                 try:
                     tile_path = os.path.join(tile_output_dir, f'tile_{zoom}_{x}_{y}.jpg')
                     tile_img = Image.open(tile_path)
+
                     pos_x = (x - x_range[0]) * tile_width
                     pos_y = (y - y_range[0]) * tile_height
+
                     merged.paste(tile_img, (pos_x, pos_y))
+                    print(f"已拼接瓦片 ({x},{y})")
                 except Exception as e:
                     print(f"拼接失败 ({x},{y}): {str(e)}")
         
@@ -327,13 +328,13 @@ class DemMakeQGISHeadless:
         print(f"\n拼接完成! 临时图像保存至: {temp_jpg}")
         
         transformer = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
-        _, tile_y_min = self._num2deg(x_range[0], y_range[1] + 1, zoom)
-        _, tile_y_max = self._num2deg(x_range[0], y_range[0], zoom)
-        tile_x_min, _ = self._num2deg(x_range[0], y_range[0], zoom)
-        tile_x_max, _ = self._num2deg(x_range[1] + 1, y_range[0], zoom)
+       
+        print(f"lon_min: {lon_min}, lon_max: {lon_max}, lat_min: {lat_min}, lat_max: {lat_max}")
+        x_min_3857, y_min_3857 = transformer.transform(lon_min, lat_min)
+        x_max_3857, y_max_3857 = transformer.transform(lon_max, lat_max)
         
-        x_min_3857, y_min_3857 = transformer.transform(tile_x_min, tile_y_min)
-        x_max_3857, y_max_3857 = transformer.transform(tile_x_max, tile_y_max)
+        # 消除警告 + 明确开启异常（推荐）
+        gdal.UseExceptions()
         
         gcp_list = [
             gdal.GCP(x_min_3857, y_max_3857, 0, 0, 0),
@@ -343,13 +344,14 @@ class DemMakeQGISHeadless:
         ]
         
         options = gdal.TranslateOptions(format='GTiff', outputSRS='EPSG:3857', GCPs=gcp_list)
-        tif_path = os.path.join(self.project_path, '地图范围-天地图.tif')
+        tif_path = os.path.join(self.project_path, 'map_extent.tif')
         gdal.Translate(tif_path, temp_jpg, options=options)
         print(f"GeoTIFF保存至: {tif_path}")
         
+        '''
         if os.path.exists(temp_jpg):
             os.remove(temp_jpg)
-        
+        '''
         return tif_path
     
     def _add_tif_to_project(self, tif_path):
