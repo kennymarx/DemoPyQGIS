@@ -2,6 +2,9 @@ import math
 import os
 import sys
 import shutil
+import time
+import requests
+import subprocess
 from PyQt5.QtCore import QMetaType
 
 
@@ -380,6 +383,201 @@ class DemMakeQGISHeadless:
         print("\n=== 天地图下载完成 ===")
         return tif_path
 
+    def download_osm_data(self, output_file=None, timeout=300):
+        """
+        从OpenStreetMap下载指定区域的全量OSM数据并保存为.osm格式文件
+        
+        参数:
+        output_file (str): 输出文件路径，默认为项目目录下的map.osm
+        timeout (int): 请求超时时间（秒），默认为300秒
+        
+        返回:
+        str: OSM文件路径，如果下载失败返回None
+        """
+        if not self._check_gpkg_exists():
+            raise RuntimeError("地图范围.gpkg不存在，请先创建")
+        
+        extent = self._get_gpkg_extent()
+        min_lon = extent['lon_min']
+        min_lat = extent['lat_min']
+        max_lon = extent['lon_max']
+        max_lat = extent['lat_max']
+        
+        if output_file is None:
+            output_file = os.path.join(self.project_path, 'map.osm')
+        
+        overpass_url = "https://overpass-api.de/api/map"
+        query_params = {
+            "bbox": f"{min_lon}, {min_lat}, {max_lon}, {max_lat}"
+        }
+        
+        headers = {
+            "User-Agent": "QGIS Headless OSM Downloader/1.0 (https://github.com/kennymarx/DemoPyQGIS)"
+        }
+        
+        print(f"\n=== 开始下载OSM数据 ===")
+        print(f"边界框: {min_lon:.6f}, {min_lat:.6f}, {max_lon:.6f}, {max_lat:.6f}")
+        print(f"目标文件: {output_file}")
+        
+        try:
+            start_time = time.time()
+            response = requests.get(
+                overpass_url, 
+                params=query_params, 
+                headers=headers, 
+                timeout=timeout, 
+                stream=True
+            )
+            
+            if response.status_code == 200:
+                total_size = int(response.headers.get('content-length', 0))
+                block_size = 1024
+                
+                os.makedirs(os.path.dirname(output_file) or '.', exist_ok=True)
+                
+                with open(output_file, 'wb') as file:
+                    downloaded_size = 0
+                    for data in response.iter_content(block_size):
+                        downloaded_size += len(data)
+                        file.write(data)
+                        if total_size > 0:
+                            progress = (downloaded_size / total_size) * 100
+                            print(f"\r下载进度: {progress:.1f}% ({downloaded_size / 1024:.1f} KB)", end='')
+                
+                download_time = time.time() - start_time
+                file_size = os.path.getsize(output_file)
+                print(f"\n下载完成！文件大小: {file_size / (1024 * 1024):.2f} MB")
+                print(f"下载用时: {download_time:.2f} 秒")
+                print("=== OSM数据下载完成 ===")
+                
+                return output_file
+            else:
+                print(f"下载失败，状态码: {response.status_code}")
+                print(f"错误信息: {response.text}")
+                if "Request size too large" in response.text:
+                    print("提示: 请求的区域可能太大。请尝试减小边界框的大小。")
+                return None
+                
+        except requests.exceptions.Timeout:
+            print(f"请求超时，超时时间: {timeout} 秒")
+            return None
+        except requests.exceptions.RequestException as e:
+            print(f"发生网络错误: {e}")
+            return None
+        except Exception as e:
+            print(f"发生未知错误: {e}")
+            return None
+
+    def extract_osm_to_gpkg(self, osm_file=None, layers=None):
+        """
+        使用ogr2ogr命令行工具提取OSM文件，转换为GeoPackage格式
+        
+        参数:
+        osm_file (str): 输入OSM文件路径，默认为项目目录下的map.osm
+        layers (list): 要转换的图层列表，如['points', 'lines', 'multipolygons']
+                      默认为['points', 'lines', 'multipolygons']
+        
+        返回:
+        list: 成功转换的GPKG文件路径列表
+        """
+        if osm_file is None:
+            osm_file = os.path.join(self.project_path, 'map.osm')
+        
+        if not os.path.exists(osm_file):
+            print(f"错误: OSM文件不存在: {osm_file}")
+            return []
+        
+        if layers is None:
+            layers = ['points', 'lines', 'multipolygons']
+        
+        output_files = []
+        
+        print(f"\n=== 开始提取OSM数据 ===")
+        print(f"输入文件: {osm_file}")
+        print(f"要提取的图层: {layers}")
+        
+        for layer in layers:
+            output_file = os.path.join(self.project_path, f'osm_{layer}.gpkg')
+            
+            cmd = [
+                'ogr2ogr',
+                '-f', 'GPKG',
+                '-nln', layer,
+                output_file,
+                osm_file,
+                layer
+            ]
+            
+            try:
+                subprocess.run(cmd, check=True, capture_output=True, text=True)
+                print(f"成功提取 {layer} 图层 -> {os.path.basename(output_file)}")
+                output_files.append(output_file)
+            except subprocess.CalledProcessError as e:
+                print(f"提取 {layer} 图层失败: {e.stderr}")
+        
+        print("=== OSM数据提取完成 ===")
+        return output_files
+
+    def add_osm_gpkg_layers_to_project(self, gpkg_files=None):
+        """
+        将提取的OSM GPKG图层添加到QGIS项目
+        
+        参数:
+        gpkg_files (list): GPKG文件路径列表，默认为自动查找项目目录下的osm_*.gpkg文件
+        
+        返回:
+        list: 成功添加的图层对象列表
+        """
+        from qgis.core import QgsVectorLayer
+        
+        if gpkg_files is None:
+            # 自动查找项目目录下的osm_*.gpkg文件
+            gpkg_files = []
+            for f in os.listdir(self.project_path):
+                if f.startswith('osm_') and f.endswith('.gpkg'):
+                    gpkg_files.append(os.path.join(self.project_path, f))
+        
+        if not gpkg_files:
+            print("警告: 未找到OSM GPKG文件")
+            return []
+        
+        added_layers = []
+        root = self.project.layerTreeRoot()
+        
+        print(f"\n=== 开始添加OSM图层到项目 ===")
+        
+        for gpkg_file in gpkg_files:
+            if not os.path.exists(gpkg_file):
+                print(f"警告: 文件不存在: {gpkg_file}")
+                continue
+            
+            layer_name = os.path.basename(gpkg_file).replace('.gpkg', '').replace('osm_', '')
+            
+            # 检查图层是否已存在
+            existing_layer = None
+            for layer in self.project.mapLayers().values():
+                if layer.name() == layer_name:
+                    existing_layer = layer
+                    break
+            
+            if existing_layer:
+                print(f"图层 {layer_name} 已存在，跳过")
+                continue
+            
+            layer = QgsVectorLayer(gpkg_file, layer_name, 'ogr')
+            
+            if not layer.isValid():
+                print(f"加载图层失败: {gpkg_file}")
+                continue
+            
+            self.project.addMapLayer(layer, False)
+            root.addLayer(layer)
+            added_layers.append(layer)
+            print(f"已添加图层: {layer_name}")
+        
+        print("=== OSM图层添加完成 ===")
+        return added_layers
+
 
 if __name__ == "__main__":
     center_lon = 113.370327
@@ -424,6 +622,50 @@ if __name__ == "__main__":
                 print("验证失败: 地图范围-天地图.tif 未创建!")
         else:
             print("验证失败: 地图范围.gpkg 不存在!")
+        
+        print("\n=== 开始OSM数据下载验证 ===")
+        osm_path = None
+        if maker._check_gpkg_exists():
+            print("地图范围.gpkg存在，开始下载OSM数据...")
+            osm_path = maker.download_osm_data()
+            
+            if osm_path and os.path.exists(osm_path):
+                print(f"验证成功: {osm_path} 已创建!")
+                print(f"文件大小: {os.path.getsize(osm_path)} bytes")
+            else:
+                print("验证失败: OSM数据下载失败!")
+        else:
+            print("验证失败: 地图范围.gpkg 不存在!")
+        
+        print("\n=== 开始OSM数据提取验证 ===")
+        gpkg_files = []
+        if osm_path and os.path.exists(osm_path):
+            print("OSM文件存在，开始提取数据...")
+            gpkg_files = maker.extract_osm_to_gpkg(osm_path)
+            
+            if gpkg_files:
+                print(f"验证成功: 已提取 {len(gpkg_files)} 个图层")
+                for gpkg in gpkg_files:
+                    print(f"  - {os.path.basename(gpkg)}")
+            else:
+                print("验证失败: OSM数据提取失败!")
+        else:
+            print("跳过: OSM文件不存在")
+        
+        print("\n=== 开始添加OSM图层到项目验证 ===")
+        if gpkg_files:
+            print("开始添加OSM图层到项目...")
+            added_layers = maker.add_osm_gpkg_layers_to_project(gpkg_files)
+            
+            if added_layers:
+                print(f"验证成功: 已添加 {len(added_layers)} 个图层")
+                print("\n重新保存项目...")
+                final_project_path = maker.save_project()
+                print(f"最终项目已保存到: {final_project_path}")
+            else:
+                print("验证失败: 添加图层失败!")
+        else:
+            print("跳过: 没有可添加的GPKG文件")
         
         print("\n=== 所有测试完成 ===")
         
