@@ -6,7 +6,7 @@ import time
 import requests
 import subprocess
 from PyQt5.QtCore import QMetaType
-
+from shapely.validation import make_valid
 
 TIANDITU_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
@@ -578,6 +578,562 @@ class DemMakeQGISHeadless:
         print("=== OSM图层添加完成 ===")
         return added_layers
 
+    # 修复几何图形错误
+    def clean_geometries(self, gdf):
+        gdf = gdf[gdf.geometry.notna()].copy()
+        # 官方修复函数，比 buffer(0) 更精准
+        gdf['geometry'] = gdf['geometry'].apply(make_valid)
+        # 过滤修复后依然无效的几何
+        gdf = gdf[gdf.is_valid]
+        # 单部件化
+        gdf = gdf.explode(index_parts=False).reset_index(drop=True)
+        return gdf
+
+    def intersect_osm_with_extent(self, extent_gpkg=None, osm_layers=None):
+        """
+        将OSM图层与地图范围图层进行相交运算，只保留落在地图范围内的OSM数据
+        
+        参数:
+        extent_gpkg (str): 地图范围GPKG文件路径，默认为项目目录下的"地图范围.gpkg"
+        osm_layers (dict): OSM图层字典，key为类型名，value为图层文件路径
+                          默认为项目目录下的osm_points.gpkg, osm_lines.gpkg, osm_multipolygons.gpkg
+        
+        返回:
+        dict: 相交结果文件路径字典，key为类型名，value为输出文件路径
+        """
+        import geopandas as gpd
+        from shapely.errors import TopologicalError
+        
+        print("\n=== 开始OSM图层与地图范围相交运算 ===")
+        
+        if extent_gpkg is None:
+            extent_gpkg = os.path.join(self.project_path, "地图范围.gpkg")
+        
+        if not os.path.exists(extent_gpkg):
+            print(f"错误: 地图范围文件不存在: {extent_gpkg}")
+            return {}
+        
+        if osm_layers is None:
+            osm_layers = {
+                'points': os.path.join(self.project_path, 'osm_points.gpkg'),
+                'lines': os.path.join(self.project_path, 'osm_lines.gpkg'),
+                'multipolygons': os.path.join(self.project_path, 'osm_multipolygons.gpkg')
+            }
+        
+        result_files = {}
+        
+        try:
+            extent_gdf = gpd.read_file(extent_gpkg)
+            if extent_gdf.empty:
+                print("警告: 地图范围图层为空")
+                return {}
+            
+            if not extent_gdf.is_valid.all():
+                extent_gdf = extent_gdf.make_valid()
+                
+        except Exception as e:
+            print(f"读取地图范围文件失败: {e}")
+            return {}
+        
+        for layer_type, osm_file in osm_layers.items():
+            if not os.path.exists(osm_file):
+                print(f"警告: OSM文件不存在，跳过: {osm_file}")
+                continue
+            
+            try:
+                osm_gdf = gpd.read_file(osm_file)
+                
+                if osm_gdf.empty:
+                    print(f"警告: OSM图层 {layer_type} 为空，跳过")
+                    continue
+                
+                # 调用类方法清理几何
+                osm_gdf = self.clean_geometries(osm_gdf)
+                print(f"已修复 {layer_type} 图层几何图形错误")
+                print(osm_gdf.is_valid.all())
+                
+                if not osm_gdf.is_valid.all():
+                    osm_gdf = osm_gdf.make_valid()
+                
+                # 根据 layer_type 自动保留正确的几何类型
+                if layer_type == "multipolygons":
+                    osm_gdf = osm_gdf[osm_gdf.geometry.type.isin(["Polygon", "MultiPolygon"])]
+                elif layer_type == "lines":
+                    osm_gdf = osm_gdf[osm_gdf.geometry.type.isin(["LineString", "MultiLineString"])]
+                elif layer_type == "points":
+                    osm_gdf = osm_gdf[osm_gdf.geometry.type.isin(["Point", "MultiPoint"])]
+                    
+                # 爆炸多部件几何（避免拓扑错误）
+                osm_gdf = osm_gdf.explode(index_parts=False).reset_index(drop=True)
+
+                # 最后再清理一次无效几何
+                osm_gdf = osm_gdf[osm_gdf.is_valid]
+                if osm_gdf.empty:
+                    print(f"警告: 过滤无效几何后 {layer_type} 为空，跳过")
+                    return result_files
+                
+                # 检查坐标参考系是否一致
+                if extent_gdf.crs != osm_gdf.crs:
+                    print(f"坐标参考系不一致，正在转换 {layer_type} 图层...")
+                    osm_gdf = osm_gdf.to_crs(extent_gdf.crs)
+                
+                print(f"执行 {layer_type} 图层相交运算...")
+                intersection_gdf = gpd.overlay(osm_gdf, extent_gdf, how='intersection')
+                
+                if intersection_gdf.empty:
+                    print(f"警告: {layer_type} 图层与地图范围无相交部分")
+                    continue
+                
+                output_file = os.path.join(self.project_path, f'extent_osm_{layer_type}.gpkg')
+                intersection_gdf.to_file(output_file, layer=f'extent_osm_{layer_type}', driver='GPKG')
+                result_files[layer_type] = output_file
+                print(f"成功: extent_osm_{layer_type}.gpkg 已生成 ({len(intersection_gdf)} 个要素)")
+                
+            except TopologicalError as e:
+                print(f"拓扑错误 ({layer_type}): {e}")
+            except Exception as e:
+                print(f"相交运算错误 ({layer_type}): {e}")
+        
+        print("=== OSM图层相交运算完成 ===")
+        return result_files
+
+    def add_extent_osm_layers_with_styles(self, extent_osm_files=None):
+        """
+        将extent_osm图层添加到QGIS项目并加载QML样式
+        
+        参数:
+        extent_osm_files (dict): extent_osm文件路径字典，key为类型名，value为文件路径
+                               默认为项目目录下的extent_osm_points.gpkg等文件
+        
+        返回:
+        list: 成功添加的图层对象列表
+        """
+        from qgis.core import QgsVectorLayer
+        
+        if extent_osm_files is None:
+            extent_osm_files = {
+                'points': os.path.join(self.project_path, 'extent_osm_points.gpkg'),
+                'lines': os.path.join(self.project_path, 'extent_osm_lines.gpkg'),
+                'multipolygons': os.path.join(self.project_path, 'extent_osm_multipolygons.gpkg')
+            }
+        
+        style_map = {
+            'points': 'POI图层样式.qml',
+            'lines': '线图层样式.qml',
+            'multipolygons': '面图层样式.qml'
+        }
+        
+        added_layers = []
+        root = self.project.layerTreeRoot()
+        
+        print("\n=== 开始添加extent_osm图层并加载样式 ===")
+        
+        for layer_type, gpkg_file in extent_osm_files.items():
+            if not os.path.exists(gpkg_file):
+                print(f"警告: 文件不存在，跳过: {gpkg_file}")
+                continue
+            
+            layer_name = f'extent_osm_{layer_type}'
+            
+            existing_layer = None
+            for layer in self.project.mapLayers().values():
+                if layer.name() == layer_name:
+                    existing_layer = layer
+                    break
+            
+            if existing_layer:
+                print(f"图层 {layer_name} 已存在，更新数据...")
+                layer = existing_layer
+            else:
+                layer = QgsVectorLayer(gpkg_file, layer_name, 'ogr')
+                if not layer.isValid():
+                    print(f"加载图层失败: {gpkg_file}")
+                    continue
+            
+            style_path = os.path.join(self.project_path, style_map.get(layer_type, ''))
+            if os.path.exists(style_path):
+                print(f"加载样式: {style_path}")
+                layer.loadNamedStyle(style_path)
+                layer.triggerRepaint()
+            else:
+                print(f"样式文件不存在: {style_path}")
+            
+            if not existing_layer:
+                self.project.addMapLayer(layer, False)
+                root.addLayer(layer)
+            
+            added_layers.append(layer)
+            print(f"已添加图层: {layer_name}")
+        
+        print("=== extent_osm图层添加完成 ===")
+        return added_layers
+
+    def extract_dem_by_extent(self, dem_files_dir=None, extent_gpkg=None):
+        """
+        根据地图范围裁剪DEM影像，生成extent_dem.tif文件
+        
+        参数:
+        dem_files_dir (str): DEM文件所在目录，默认为脚本目录下的dem_files文件夹
+        extent_gpkg (str): 地图范围GPKG文件路径，默认为项目目录下的"地图范围.gpkg"
+        
+        返回:
+        str: 裁剪后的DEM文件路径，如果失败返回None
+        """
+        from osgeo import gdal
+        
+        print("\n=== 开始裁剪DEM影像 ===")
+        
+        if dem_files_dir is None:
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            dem_files_dir = os.path.join(current_dir, "dem_files")
+        
+        if extent_gpkg is None:
+            extent_gpkg = os.path.join(self.project_path, "地图范围.gpkg")
+        
+        if not os.path.exists(dem_files_dir):
+            print(f"错误: DEM文件目录不存在: {dem_files_dir}")
+            return None
+        
+        if not os.path.exists(extent_gpkg):
+            print(f"错误: 地图范围文件不存在: {extent_gpkg}")
+            return None
+        
+        dem_files = []
+        for f in os.listdir(dem_files_dir):
+            if f.lower().endswith(('.tif', '.tiff')):
+                dem_files.append(os.path.join(dem_files_dir, f))
+        
+        if not dem_files:
+            print("警告: DEM文件目录中未找到TIF文件")
+            return None
+        
+        extent_info = self._get_gpkg_extent()
+        lon_min = extent_info['lon_min']
+        lon_max = extent_info['lon_max']
+        lat_min = extent_info['lat_min']
+        lat_max = extent_info['lat_max']
+        
+        print(f"地图范围: lon[{lon_min:.6f}, {lon_max:.6f}], lat[{lat_min:.6f}, {lat_max:.6f}]")
+        
+        for dem_file in dem_files:
+            print(f"检查DEM文件: {os.path.basename(dem_file)}")
+            
+            try:
+                ds = gdal.Open(dem_file)
+                if not ds:
+                    print(f"无法打开DEM文件: {dem_file}")
+                    continue
+                
+                geotransform = ds.GetGeoTransform()
+                dem_min_x = geotransform[0]
+                dem_max_x = geotransform[0] + geotransform[1] * ds.RasterXSize
+                dem_min_y = geotransform[3] + geotransform[5] * ds.RasterYSize
+                dem_max_y = geotransform[3]
+                
+                if (lon_min >= dem_max_x or lon_max <= dem_min_x or
+                    lat_min >= dem_max_y or lat_max <= dem_min_y):
+                    print(f"DEM文件不包含地图范围，跳过")
+                    ds = None
+                    continue
+                
+                print(f"DEM文件包含地图范围，开始裁剪...")
+                
+                output_file = os.path.join(self.project_path, "extent_dem.tif")
+                
+                gdal.Warp(
+                    output_file,
+                    dem_file,
+                    outputBounds=[lon_min, lat_min, lon_max, lat_max],
+                    dstSRS="EPSG:4326",
+                    format="GTiff",
+                    resampleAlg=gdal.GRA_Bilinear
+                )
+                
+                ds = None
+                
+                if os.path.exists(output_file):
+                    print(f"成功: extent_dem.tif 已生成")
+                    return output_file
+                else:
+                    print("错误: 裁剪失败，输出文件未生成")
+                    return None
+                    
+            except Exception as e:
+                print(f"处理DEM文件时出错: {e}")
+                continue
+        
+        print("未找到包含地图范围的DEM文件")
+        return None
+
+    def generate_contour_from_dem(self, dem_file=None, contour_file=None):
+        """
+        从DEM文件提取等高线，生成extent_contour.gpkg文件
+        
+        参数:
+        dem_file (str): 输入DEM文件路径，默认为项目目录下的extent_dem.tif
+        contour_file (str): 输出等高线GPKG文件路径，默认为extent_contour.gpkg
+        
+        返回:
+        str: 等高线文件路径，如果失败返回None
+        """
+        import subprocess
+        
+        print("\n=== 开始提取等高线 ===")
+        
+        if dem_file is None:
+            dem_file = os.path.join(self.project_path, "extent_dem.tif")
+        
+        if contour_file is None:
+            contour_file = os.path.join(self.project_path, "extent_contour.gpkg")
+        
+        if not os.path.exists(dem_file):
+            print(f"错误: DEM文件不存在: {dem_file}")
+            return None
+        
+        os.environ['GDAL_DATA'] = os.path.join(sys.prefix, "Library", "share", "gdal")
+        os.environ['PATH'] = f"{os.path.join(sys.prefix, 'Library', 'bin')};{os.environ['PATH']}"
+        
+        command = [
+            "gdal_contour",
+            "-b", "1",
+            "-a", "ELEV",
+            "-i", "10.0",
+            "-f", "GPKG",
+            dem_file,
+            contour_file
+        ]
+        
+        try:
+            result = subprocess.run(
+                command,
+                check=True,
+                capture_output=True,
+                text=True
+            )
+            print("等高线提取成功")
+            if os.path.exists(contour_file):
+                return contour_file
+            else:
+                print("错误: 等高线文件未生成")
+                return None
+        except subprocess.CalledProcessError as e:
+            print(f"等高线提取失败: {e.stderr}")
+            return None
+
+    def add_contour_layer(self, contour_file=None):
+        """
+        将等高线图层添加到QGIS项目并加载样式
+        
+        参数:
+        contour_file (str): 等高线GPKG文件路径，默认为extent_contour.gpkg
+        
+        返回:
+        QgsVectorLayer: 添加的图层对象，如果失败返回None
+        """
+        from qgis.core import QgsVectorLayer
+        
+        print("\n=== 开始添加等高线图层 ===")
+        
+        if contour_file is None:
+            contour_file = os.path.join(self.project_path, "extent_contour.gpkg")
+        
+        if not os.path.exists(contour_file):
+            print(f"错误: 等高线文件不存在: {contour_file}")
+            return None
+        
+        layer_name = "extent_contour"
+        
+        existing_layer = None
+        for layer in self.project.mapLayers().values():
+            if layer.name() == layer_name:
+                existing_layer = layer
+                break
+        
+        if existing_layer:
+            print(f"图层 {layer_name} 已存在")
+            return existing_layer
+        
+        layer = QgsVectorLayer(contour_file, layer_name, 'ogr')
+        if not layer.isValid():
+            print(f"加载图层失败: {contour_file}")
+            return None
+        
+        style_path = os.path.join(self.project_path, "等高线图层样式.qml")
+        if os.path.exists(style_path):
+            print(f"加载样式: {style_path}")
+            layer.loadNamedStyle(style_path)
+            layer.triggerRepaint()
+        else:
+            print(f"样式文件不存在: {style_path}")
+        
+        self.project.addMapLayer(layer, False)
+        root = self.project.layerTreeRoot()
+        root.addLayer(layer)
+        
+        print(f"已添加图层: {layer_name}")
+        return layer
+
+    def add_dem_elevation_layer(self, dem_file=None):
+        """
+        将DEM高程渲染层添加到QGIS项目并加载样式
+        
+        参数:
+        dem_file (str): DEM文件路径，默认为extent_dem_new.tif
+        
+        返回:
+        QgsRasterLayer: 添加的图层对象，如果失败返回None
+        """
+        from qgis.core import QgsRasterLayer
+        import shutil
+        
+        print("\n=== 开始添加DEM高程渲染层 ===")
+        
+        original_dem = os.path.join(self.project_path, "extent_dem.tif")
+        if dem_file is None:
+            dem_file = os.path.join(self.project_path, "extent_dem_new.tif")
+        
+        if not os.path.exists(original_dem):
+            print(f"错误: 原始DEM文件不存在: {original_dem}")
+            return None
+        
+        shutil.copy2(original_dem, dem_file)
+        print(f"复制DEM文件: {original_dem} -> {dem_file}")
+        
+        layer_name = "extent_dem_new"
+        
+        existing_layer = None
+        for layer in self.project.mapLayers().values():
+            if layer.name() == layer_name:
+                existing_layer = layer
+                break
+        
+        if existing_layer:
+            print(f"图层 {layer_name} 已存在")
+            return existing_layer
+        
+        layer = QgsRasterLayer(dem_file, layer_name)
+        if not layer.isValid():
+            print(f"加载图层失败: {dem_file}")
+            return None
+        
+        style_path = os.path.join(self.project_path, "高程渲染层样式.qml")
+        if os.path.exists(style_path):
+            print(f"加载样式: {style_path}")
+            layer.loadNamedStyle(style_path)
+            layer.triggerRepaint()
+        else:
+            print(f"样式文件不存在: {style_path}")
+        
+        self.project.addMapLayer(layer, False)
+        root = self.project.layerTreeRoot()
+        root.addLayer(layer)
+        
+        print(f"已添加图层: {layer_name}")
+        return layer
+
+    def generate_hillshade(self, dem_file=None, hillshade_file=None, azimuth=315, altitude=45, z_factor=1):
+        """
+        生成山体阴影
+        
+        参数:
+        dem_file (str): 输入DEM文件路径，默认为项目目录下的extent_dem.tif
+        hillshade_file (str): 输出山体阴影文件路径，默认为extent_dem_hillshadow.tif
+        azimuth (float): 太阳方位角（度），默认315度（西北方向）
+        altitude (float): 太阳高度角（度），默认45度
+        z_factor (float): 高程缩放因子，默认1
+        
+        返回:
+        str: 山体阴影文件路径，如果失败返回None
+        """
+        import subprocess
+        
+        print("\n=== 开始生成山体阴影 ===")
+        
+        if dem_file is None:
+            dem_file = os.path.join(self.project_path, "extent_dem.tif")
+        
+        if hillshade_file is None:
+            hillshade_file = os.path.join(self.project_path, "extent_dem_hillshadow.tif")
+        
+        if not os.path.exists(dem_file):
+            print(f"错误: DEM文件不存在: {dem_file}")
+            return None
+        
+        os.environ['GDAL_DATA'] = os.path.join(sys.prefix, "Library", "share", "gdal")
+        os.environ['PATH'] = f"{os.path.join(sys.prefix, 'Library', 'bin')};{os.environ['PATH']}"
+        
+        command = [
+            "gdaldem",
+            "hillshade",
+            "-az", str(azimuth),
+            "-alt", str(altitude),
+            "-z", str(z_factor),
+            dem_file,
+            hillshade_file
+        ]
+        
+        try:
+            result = subprocess.run(
+                command,
+                check=True,
+                capture_output=True,
+                text=True
+            )
+            print("山体阴影生成成功")
+            if os.path.exists(hillshade_file):
+                return hillshade_file
+            else:
+                print("错误: 山体阴影文件未生成")
+                return None
+        except subprocess.CalledProcessError as e:
+            print(f"山体阴影生成失败: {e.stderr}")
+            return None
+
+    def add_hillshade_layer(self, hillshade_file=None):
+        """
+        将山体阴影图层添加到QGIS项目
+        
+        参数:
+        hillshade_file (str): 山体阴影文件路径，默认为extent_dem_hillshadow.tif
+        
+        返回:
+        QgsRasterLayer: 添加的图层对象，如果失败返回None
+        """
+        from qgis.core import QgsRasterLayer
+        
+        print("\n=== 开始添加山体阴影图层 ===")
+        
+        if hillshade_file is None:
+            hillshade_file = os.path.join(self.project_path, "extent_dem_hillshadow.tif")
+        
+        if not os.path.exists(hillshade_file):
+            print(f"错误: 山体阴影文件不存在: {hillshade_file}")
+            return None
+        
+        layer_name = "extent_dem_hillshadow"
+        
+        existing_layer = None
+        for layer in self.project.mapLayers().values():
+            if layer.name() == layer_name:
+                existing_layer = layer
+                break
+        
+        if existing_layer:
+            print(f"图层 {layer_name} 已存在")
+            return existing_layer
+        
+        layer = QgsRasterLayer(hillshade_file, layer_name)
+        if not layer.isValid():
+            print(f"加载图层失败: {hillshade_file}")
+            return None
+        
+        self.project.addMapLayer(layer, False)
+        root = self.project.layerTreeRoot()
+        root.addLayer(layer)
+        
+        print(f"已添加图层: {layer_name}")
+        return layer
+
 
 if __name__ == "__main__":
     center_lon = 113.370327
@@ -666,6 +1222,120 @@ if __name__ == "__main__":
                 print("验证失败: 添加图层失败!")
         else:
             print("跳过: 没有可添加的GPKG文件")
+
+        print("\n=== 开始OSM图层相交运算验证 ===")
+        osm_gpkg_files = {
+            'points': os.path.join(project_dir, 'osm_points.gpkg'),
+            'lines': os.path.join(project_dir, 'osm_lines.gpkg'),
+            'multipolygons': os.path.join(project_dir, 'osm_multipolygons.gpkg')
+        }
+        extent_gpkg = os.path.join(project_dir, "地图范围.gpkg")
+
+        if all(os.path.exists(f) for f in osm_gpkg_files.values()) and os.path.exists(extent_gpkg):
+            print("OSM图层文件和地图范围文件都存在，开始相交运算...")
+            extent_osm_files = maker.intersect_osm_with_extent(extent_gpkg=extent_gpkg, osm_layers=osm_gpkg_files)
+
+            if extent_osm_files:
+                print(f"验证成功: 已生成 {len(extent_osm_files)} 个extent_osm文件")
+                for layer_type, file_path in extent_osm_files.items():
+                    print(f"  - {os.path.basename(file_path)}")
+
+                print("\n=== 开始添加extent_osm图层并加载样式验证 ===")
+                added_extent_layers = maker.add_extent_osm_layers_with_styles(extent_osm_files)
+
+                if added_extent_layers:
+                    print(f"验证成功: 已添加 {len(added_extent_layers)} 个extent_osm图层")
+                    print("\n重新保存项目...")
+                    final_project_path = maker.save_project()
+                    print(f"最终项目已保存到: {final_project_path}")
+                else:
+                    print("验证失败: 添加extent_osm图层失败!")
+            else:
+                print("验证失败: 相交运算失败!")
+        else:
+            missing_files = [f for f in osm_gpkg_files.values() if not os.path.exists(f)]
+            if not os.path.exists(extent_gpkg):
+                missing_files.append(extent_gpkg)
+            print(f"跳过: 缺少必要文件: {[os.path.basename(f) for f in missing_files]}")
+        
+        print("\n=== 开始DEM影像裁剪验证 ===")
+        dem_files_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dem_files")
+        extent_gpkg = os.path.join(project_dir, "地图范围.gpkg")
+        
+        if os.path.exists(dem_files_dir) and os.path.exists(extent_gpkg):
+            print("DEM目录和地图范围文件都存在，开始裁剪DEM...")
+            extent_dem = maker.extract_dem_by_extent(dem_files_dir=dem_files_dir, extent_gpkg=extent_gpkg)
+            
+            if extent_dem and os.path.exists(extent_dem):
+                print(f"验证成功: {os.path.basename(extent_dem)} 已生成")
+                print(f"文件大小: {os.path.getsize(extent_dem)} bytes")
+            else:
+                print("验证失败: DEM裁剪失败!")
+        else:
+            print("跳过: DEM目录或地图范围文件不存在")
+        
+        print("\n=== 开始等高线提取验证 ===")
+        extent_dem_path = os.path.join(project_dir, "extent_dem.tif")
+        
+        if os.path.exists(extent_dem_path):
+            print("extent_dem.tif存在，开始提取等高线...")
+            contour_file = maker.generate_contour_from_dem(dem_file=extent_dem_path)
+            
+            if contour_file and os.path.exists(contour_file):
+                print(f"验证成功: {os.path.basename(contour_file)} 已生成")
+                
+                print("\n=== 开始添加等高线图层验证 ===")
+                contour_layer = maker.add_contour_layer(contour_file=contour_file)
+                
+                if contour_layer:
+                    print("验证成功: 等高线图层已添加")
+                    print("\n重新保存项目...")
+                    final_project_path = maker.save_project()
+                    print(f"项目已保存到: {final_project_path}")
+                else:
+                    print("验证失败: 添加等高线图层失败!")
+            else:
+                print("验证失败: 等高线提取失败!")
+        else:
+            print("跳过: extent_dem.tif不存在")
+        
+        print("\n=== 开始DEM高程渲染层验证 ===")
+        if os.path.exists(extent_dem_path):
+            print("extent_dem.tif存在，开始添加DEM高程渲染层...")
+            dem_layer = maker.add_dem_elevation_layer()
+            
+            if dem_layer:
+                print("验证成功: DEM高程渲染层已添加")
+                print("\n重新保存项目...")
+                final_project_path = maker.save_project()
+                print(f"项目已保存到: {final_project_path}")
+            else:
+                print("验证失败: 添加DEM高程渲染层失败!")
+        else:
+            print("跳过: extent_dem.tif不存在")
+        
+        print("\n=== 开始山体阴影验证 ===")
+        if os.path.exists(extent_dem_path):
+            print("extent_dem.tif存在，开始生成山体阴影...")
+            hillshade_file = maker.generate_hillshade(dem_file=extent_dem_path)
+            
+            if hillshade_file and os.path.exists(hillshade_file):
+                print(f"验证成功: {os.path.basename(hillshade_file)} 已生成")
+                
+                print("\n=== 开始添加山体阴影图层验证 ===")
+                hillshade_layer = maker.add_hillshade_layer(hillshade_file=hillshade_file)
+                
+                if hillshade_layer:
+                    print("验证成功: 山体阴影图层已添加")
+                    print("\n重新保存项目...")
+                    final_project_path = maker.save_project()
+                    print(f"项目已保存到: {final_project_path}")
+                else:
+                    print("验证失败: 添加山体阴影图层失败!")
+            else:
+                print("验证失败: 山体阴影生成失败!")
+        else:
+            print("跳过: extent_dem.tif不存在")
         
         print("\n=== 所有测试完成 ===")
         
