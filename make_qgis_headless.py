@@ -70,12 +70,19 @@ class DemMakeQGISHeadless:
     
     def create_project(self):
         from qgis.core import QgsProject
+        from qgis.core import QgsExpressionContextUtils
         # 创建项目
         self.project = QgsProject.instance()
         # 清空项目
         self.project.clear()
         # 设置项目的坐标系wsg84
         self.project.setCrs(self.crs)
+        # 设置项目常用属性
+        QgsExpressionContextUtils.setProjectVariable(self.project, "bg_satellite", '0')
+        QgsExpressionContextUtils.setProjectVariable(self.project, "Blank_pct", '0.15')
+        QgsExpressionContextUtils.setProjectVariable(self.project, "Border", '10')
+        QgsExpressionContextUtils.setProjectVariable(self.project, "Longest_side", '1000')
+        QgsExpressionContextUtils.setProjectVariable(self.project, "project_scale_parm", '1')
         
     # 定义私有方法，将./resources目录下的所有文件拷贝到项目目录下
     def _copy_resources(self):
@@ -143,36 +150,53 @@ class DemMakeQGISHeadless:
     
 
     
-    def save_project(self, project_name="map_project.qgz"):
+    def add_map_extent_layer(self):
+        """
+        加载"地图范围.gpkg"图层，并运用"地图范围样式.qml"样式文件，然后添加到qgis项目中
+        
+        返回:
+        bool: 成功返回True，失败返回False
+        """
+        from qgis.core import QgsVectorLayer
+
         if self.project is None:
-            raise RuntimeError("项目未创建，请先调用create_project()")
-        
+            print("错误: 项目未创建")
+            return False
+
         gpkg_path = os.path.join(self.project_path, "地图范围.gpkg")
-        
+
         self._create_gpkg_file(gpkg_path)
-        
-        from qgis.core import QgsVectorLayer, QgsMapLayerStyle
-        polygon_layer = QgsVectorLayer(gpkg_path, "地图范围", "ogr")
-        
+
+        for layer in self.project.mapLayers().values():
+            if layer.name() == "地图范围":
+                print("地图范围图层已存在，跳过添加")
+                return True
+
+        polygon_layer = QgsVectorLayer(gpkg_path, "地图范围", 'ogr')
+
         if not polygon_layer.isValid():
-            raise RuntimeError("加载gpkg文件失败")
-        
+            print("加载gpkg文件失败")
+            return False
+
         style_path = os.path.join(self.project_path, "地图范围样式.qml")
 
         if os.path.exists(style_path):
             print(f"加载样式: {style_path}")
-            # 直接用图层对象加载
             polygon_layer.loadNamedStyle(style_path)
             polygon_layer.triggerRepaint()
         else:
             print("样式文件不存在，未加载样式")
-            
-        
+
         self.project.addMapLayer(polygon_layer)
-        
+        return True
+
+    def save_project(self, project_name="map_project.qgz"):
+        if self.project is None:
+            raise RuntimeError("项目未创建，请先调用create_project()")
+
         project_file_path = os.path.join(self.project_path, project_name)
         self.project.write(project_file_path)
-        
+
         return project_file_path
     
     def _create_gpkg_file(self, gpkg_path):
@@ -1126,6 +1150,14 @@ class DemMakeQGISHeadless:
         if not layer.isValid():
             print(f"加载图层失败: {hillshade_file}")
             return None
+
+        style_path = os.path.join(self.project_path, "山体阴影样式.qml")
+        if os.path.exists(style_path):
+            print(f"加载样式: {style_path}")
+            layer.loadNamedStyle(style_path)
+            layer.triggerRepaint()
+        else:
+            print(f"样式文件不存在: {style_path}")
         
         self.project.addMapLayer(layer, False)
         root = self.project.layerTreeRoot()
@@ -1156,10 +1188,13 @@ if __name__ == "__main__":
         
         print("\n创建QGIS项目...")
         maker.create_project()
-        
+
+        print("添加地图范围图层...")
+        maker.add_map_extent_layer()
+
         print("保存项目...")
         project_path = maker.save_project()
-        
+
         print(f"项目已保存到: {project_path}")
         
         print("\n=== 开始天地图下载验证 ===")
