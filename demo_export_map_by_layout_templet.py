@@ -11,14 +11,26 @@ import os
 import sys
 from datetime import datetime
 
+
 # ─────────────────────────────────────────────
 # 0. 路径配置
 # ─────────────────────────────────────────────
-DATA_DIR   = r"C:\Users\Administrator\Documents\trae_projects\QGISample\QGISMapProject"
-GPK_PATH   = os.path.join(DATA_DIR, "等高线.gpkg")
-TIF_PATH   = os.path.join(DATA_DIR, "天地图-影像地图.tif")
-SHP_PATH   = os.path.join(DATA_DIR, "地图范围.shp")
-#QPT_PATH   = os.path.join(DATA_DIR, "layoutmodel.qpt")
+DATA_DIR   = r"C:\Users\Administrator\Desktop\QGIS\TestQGISMapProject"
+'''
+# 等高线
+GPK_PATH   = os.path.join(DATA_DIR, "extent_contour-火龙.gpkg")
+# 天地图影像地图
+TIF_PATH   = os.path.join(DATA_DIR, "map_extent-火龙.tif")
+# 地图范围
+SHP_PATH   = os.path.join(DATA_DIR, "地图范围-火龙.gpkg")  
+'''
+GPK_PATH   = os.path.join(DATA_DIR, "extent_contour.gpkg")
+# 天地图影像地图
+TIF_PATH   = os.path.join(DATA_DIR, "map_extent.tif")
+# 地图范围
+SHP_PATH   = os.path.join(DATA_DIR, "地图范围.gpkg")  
+
+# 打印模板
 QPT_PATH   = os.path.join(DATA_DIR, "layoutmodel-new.qpt")
 OUTPUT_DIR = os.path.join(DATA_DIR, "output")
 DPI        = 300
@@ -59,10 +71,81 @@ from qgis.core import (
     QgsRasterLayer,
     QgsPrintLayout,
     QgsReadWriteContext,
+    QgsVectorFileWriter,
     QgsLayoutItemMap,
     QgsCoordinateReferenceSystem,
+    QgsCoordinateTransform,
+    QgsWkbTypes,
+    QgsFeature
 )
 from qgis.PyQt.QtXml import QDomDocument
+
+
+def reproject_to_3857(layer: QgsVectorLayer) -> QgsVectorLayer:
+    """
+    QGIS无头模式下，将矢量图层重投影为 EPSG:3857
+    不使用native算法，纯QGIS API遍历要素重投影
+    """
+    # 目标坐标系 EPSG:3857
+    target_crs = QgsCoordinateReferenceSystem("EPSG:3857")
+    
+    # 获取当前图层坐标系
+    source_crs = layer.crs()
+    
+    # 如果已经是3857，直接返回原图层
+    if source_crs.authid() == target_crs.authid():
+        print(f"[OK] 图层 {layer.name()} 已是 EPSG:3857，无需重投影")
+        return layer.clone()
+
+    print(f"[INFO] 图层 {layer.name()} 从 {source_crs.authid()} 重投影为 {target_crs.authid()}")
+    # 初始化坐标转换工具（QGIS标准API，非native）
+    temp_project = QgsProject.instance()
+    transform = QgsCoordinateTransform(
+        source_crs,
+        target_crs,
+        temp_project
+    )
+
+    # 创建输出内存图层（保持几何类型、字段不变）
+    geom_type = QgsWkbTypes.displayString(layer.wkbType())
+    uri = f"{geom_type}?crs=EPSG:3857"
+    output_layer = QgsVectorLayer(uri, f"{layer.name()}", "memory")
+
+    # 复制字段结构
+    output_layer.dataProvider().addAttributes(layer.fields())
+    output_layer.updateFields()
+
+    # 遍历所有要素 → 重投影 → 添加到新图层
+    output_features = []
+    for feat in layer.getFeatures():
+        new_feat = QgsFeature(feat)
+        
+        # 核心：重投影几何（纯QGIS API）
+        geom = feat.geometry()
+        if not geom.isEmpty():
+            geom.transform(transform)  # 关键重投影方法
+            new_feat.setGeometry(geom)
+        
+        output_features.append(new_feat)
+
+    # 批量写入要素
+    output_layer.dataProvider().addFeatures(output_features)
+    
+    
+    options = QgsVectorFileWriter.SaveVectorOptions()
+    options.driverName = "GPKG"
+    options.fileEncoding = "UTF-8"
+    transform_context = temp_project.transformContext()
+    
+    # 保存shp_layer到文件，格式为GeoPackage
+    QgsVectorFileWriter.writeAsVectorFormatV3(
+            output_layer,
+            os.path.join(OUTPUT_DIR, "地图范围_3857.gpkg"),
+            transform_context,
+            options
+        )
+    
+    return output_layer
 
 # ─────────────────────────────────────────────
 # 3. 加载图层到项目
@@ -98,12 +181,15 @@ if not shp_layer.isValid():
     qgs.exitQgis()
     sys.exit(1)
 # addMapLayer 第二个参数 False = 不自动加入图层树（即不可见）
+# shp_layer.setCrs(tif_layer.crs())
+shp_layer = reproject_to_3857(shp_layer)
 project.addMapLayer(shp_layer, False)
 print(f"[OK] 已加载图层：{tif_layer.name()}、{gpk_layer.name()}、{shp_layer.name()}（不可见）")
 
+
 # 以栅格图层的 CRS 作为项目 CRS
-project.setCrs(tif_layer.crs())
-print(f"[OK] 项目 CRS：{tif_layer.crs().authid()}")
+project.setCrs(shp_layer.crs())
+print(f"[OK] 项目 CRS：{shp_layer.crs().authid()}")
 
 # ─────────────────────────────────────────────
 # 4. 加载 QPT 布局模板
@@ -184,6 +270,12 @@ for item in layout.items():
         item.setLayers(layers_to_show)
         item.setCrs(tif_layer.crs())
         item.setExtent(map_extent)
+
+# test
+print(f"tif_layer crs: {tif_layer.crs()}")
+print(f"gpk_layer crs:{gpk_layer.crs()}")
+print(f"shp_layer crs: {shp_layer.crs()}")
+print(f"map_extent: {map_extent.toString(4)}")
 
 if map_items_found == 0:
     print("[警告] 布局模板中未找到地图项（QgsLayoutItemMap）")
