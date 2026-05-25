@@ -7,6 +7,7 @@ import requests
 import subprocess
 from PyQt5.QtCore import QMetaType
 from shapely.validation import make_valid
+from datetime import datetime
 
 TIANDITU_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
@@ -29,10 +30,20 @@ class DemMakeQGISHeadless:
         self.center_latitude = center_latitude
         self.side_length_km = side_length_km
         self.project_path = project_path
-        
+        self.OUTPUT = os.path.join(project_path, "output")
+        self.QPT_PATH = os.path.join(project_path, "layoutmodel-new.qpt")
+        self.TIANDITU_MAP = os.path.join(self.project_path, 'map_extent.tif')
+        self.TIANDITU_MAP_TEMP = os.path.join(self.project_path, 'map_extent_temp.tif')
+        self.EXTENT_MAP = os.path.join(self.project_path, "地图范围.gpkg")
+        self.CONTOUR_FILE = os.path.join(self.project_path, "extent_contour.gpkg")
+        self.MAP_OSM = os.path.join(self.project_path, 'map.osm')
         self.project = None
         self.qgs_app = None
-        
+        self.DPI = 300
+        self.LONGEST_SIDE = 1000.0
+        self.BLANK_PCT = 0.15
+        self.BORDER = 10.0
+
         os.makedirs(project_path, exist_ok=True)
 
         # 初始化项目资源
@@ -41,7 +52,7 @@ class DemMakeQGISHeadless:
         self._init_qgis_environment()
         
         from qgis.core import QgsCoordinateReferenceSystem
-        self.crs = QgsCoordinateReferenceSystem('EPSG:4326')
+        self.crs = QgsCoordinateReferenceSystem('EPSG:3857')
     
     def _init_qgis_environment(self):
         _conda_prefix = sys.prefix
@@ -350,16 +361,28 @@ class DemMakeQGISHeadless:
                 except Exception as e:
                     print(f"拼接失败 ({x},{y}): {str(e)}")
         
-        temp_jpg = os.path.join(self.project_path, 'tianditu_temp.jpg')
+        temp_jpg = self.TIANDITU_MAP_TEMP
+        
         merged.save(temp_jpg)
         print(f"\n拼接完成! 临时图像保存至: {temp_jpg}")
         
-        transformer = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
-       
-        print(f"lon_min: {lon_min}, lon_max: {lon_max}, lat_min: {lat_min}, lat_max: {lat_max}")
-        x_min_3857, y_min_3857 = transformer.transform(lon_min, lat_min)
-        x_max_3857, y_max_3857 = transformer.transform(lon_max, lat_max)
+        # 关键修复：根据实际下载的瓦片范围反算地理坐标
+        # 左上角瓦片 (x_min, y_min) 对应的实际地理范围
+        top_lat, left_lon = self._num2deg(x_range[0], y_range[0], zoom)
+        # 右下角瓦片 (x_max+1, y_max+1) 对应的实际地理范围（+1 是因为瓦片坐标表示左下角）
+        bottom_lat, right_lon = self._num2deg(x_range[1] + 1, y_range[1] + 1, zoom)
         
+        # 使用反算出的实际范围计算 GCP 坐标
+        transformer = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
+        x_min_3857, y_max_3857 = transformer.transform(left_lon, top_lat)    # 左上角
+        x_max_3857, y_min_3857 = transformer.transform(right_lon, bottom_lat) # 右下角
+        
+        gcp_list = [
+            gdal.GCP(x_min_3857, y_max_3857, 0, 0, 0),           # 左上角
+            gdal.GCP(x_max_3857, y_max_3857, 0, merged.width, 0),  # 右上角
+            gdal.GCP(x_min_3857, y_min_3857, 0, 0, merged.height), # 左下角
+            gdal.GCP(x_max_3857, y_min_3857, 0, merged.width, merged.height)  # 右下角
+        ]
         # 消除警告 + 明确开启异常（推荐）
         gdal.UseExceptions()
         
@@ -392,6 +415,11 @@ class DemMakeQGISHeadless:
         print(f"已添加图层到项目: {tif_path}")
     
     def download_and_add_tianditu(self, zoom_level=14):
+        if os.path.exists(self.TIANDITU_MAP):
+            print(f"警告: 天地图影像已存在: {self.TIANDITU_MAP}")
+            print(f"跳过下载，直接使用已存在文件: {self.TIANDITU_MAP}")
+            return self.TIANDITU_MAP
+
         if not self._check_gpkg_exists():
             raise RuntimeError("地图范围.gpkg不存在，请先创建")
         print("\n=== 开始下载天地图影像 ===")
@@ -418,6 +446,12 @@ class DemMakeQGISHeadless:
         返回:
         str: OSM文件路径，如果下载失败返回None
         """
+
+        # 检查OSM文件是否存在
+        if os.path.exists(self.MAP_OSM):
+            print(f"警告: OSM文件已存在: {self.MAP_OSM}")
+            return self.MAP_OSM
+
         if not self._check_gpkg_exists():
             raise RuntimeError("地图范围.gpkg不存在，请先创建")
         
@@ -890,6 +924,10 @@ class DemMakeQGISHeadless:
         return None
 
     def generate_contour_from_dem(self, dem_file=None, contour_file=None):
+        if os.path.exists(self.CONTOUR_FILE):
+            print(f"警告: 等高线文件已存在: {self.CONTOUR_FILE}")
+            print(f"跳过等高线提取，直接使用已存在文件: {self.CONTOUR_FILE}")
+            return self.CONTOUR_FILE
         """
         从DEM文件提取等高线，生成extent_contour.gpkg文件
         
@@ -936,6 +974,7 @@ class DemMakeQGISHeadless:
             )
             print("等高线提取成功")
             if os.path.exists(contour_file):
+                self.CONTOUR_FILE = contour_file
                 return contour_file
             else:
                 print("错误: 等高线文件未生成")
@@ -1166,6 +1205,252 @@ class DemMakeQGISHeadless:
         print(f"已添加图层: {layer_name}")
         return layer
 
+    def _reproject_to_3857(self, layer):
+        
+        from qgis.core import (
+            QgsProject,
+            QgsVectorLayer,
+            QgsVectorFileWriter,
+            QgsCoordinateReferenceSystem,
+            QgsCoordinateTransform,
+            QgsWkbTypes,
+            QgsFeature
+        )
+
+        target_crs = QgsCoordinateReferenceSystem("EPSG:3857")
+        source_crs = layer.crs()
+
+        if source_crs.authid() == target_crs.authid():
+            print(f"[OK] 图层 {layer.name()} 已是 EPSG:3857，无需重投影")
+            return layer.clone()
+
+        print(f"[INFO] 图层 {layer.name()} 从 {source_crs.authid()} 重投影为 {target_crs.authid()}")
+        temp_project = QgsProject.instance()
+        transform = QgsCoordinateTransform(
+            source_crs,
+            target_crs,
+            temp_project
+        )
+
+        geom_type = QgsWkbTypes.displayString(layer.wkbType())
+        uri = f"{geom_type}?crs=EPSG:3857"
+        output_layer = QgsVectorLayer(uri, f"{layer.name()}", "memory")
+
+        output_layer.dataProvider().addAttributes(layer.fields())
+        output_layer.updateFields()
+
+        output_features = []
+        for feat in layer.getFeatures():
+            new_feat = QgsFeature(feat)
+            geom = feat.geometry()
+            if not geom.isEmpty():
+                geom.transform(transform)
+                new_feat.setGeometry(geom)
+            output_features.append(new_feat)
+
+        output_layer.dataProvider().addFeatures(output_features)
+
+        options = QgsVectorFileWriter.SaveVectorOptions()
+        options.driverName = "GPKG"
+        options.fileEncoding = "UTF-8"
+        transform_context = temp_project.transformContext()
+
+        QgsVectorFileWriter.writeAsVectorFormatV3(
+            output_layer,
+            os.path.join(self.OUTPUT, "地图范围_3857.gpkg"),
+            transform_context,
+            options
+        )
+
+        return output_layer
+
+    # 20260523，天地图影像+等高线
+    def export_map_by_layout_templet(self):
+        
+        from qgis.core import (
+            QgsProject,
+            QgsPrintLayout,
+            QgsReadWriteContext,
+            QgsLayoutItemMap,
+            QgsExpressionContextUtils, 
+            QgsLayoutExporter,
+            QgsPathResolver,
+            QgsRasterLayer,
+            QgsVectorLayer,
+            QgsCoordinateReferenceSystem
+        )
+        from qgis.PyQt.QtXml import QDomDocument
+        from qgis.PyQt.QtCore import QSize, QRectF
+        
+        tdt_layer = QgsRasterLayer(self.TIANDITU_MAP, "天地图-影像地图")
+        if not tdt_layer.isValid():
+            print(f"[错误] 栅格图层加载失败：{self.TIANDITU_MAP}")
+            self.qgs_app.exitQgis()
+            sys.exit(1)
+        else:
+            print(f"[OK] 栅格图层加载成功,范围：{tdt_layer.extent()}")
+
+        contour_layer = QgsVectorLayer(self.CONTOUR_FILE, "等高线", "ogr")
+        if not contour_layer.isValid():
+            print(f"[错误] 矢量图层加载失败：{self.CONTOUR_FILE}")
+            self.qgs_app.exitQgis()
+            sys.exit(1)
+        else:
+            print(f"[OK] 等高线图层加载成功,范围：{contour_layer.extent()}")
+     
+        contour_layer = self._reproject_to_3857(contour_layer)
+        if not contour_layer.isValid():
+            print(f"[错误] 矢量图层重投影为 EPSG:3857 失败：{self.CONTOUR_FILE}")
+            self.qgs_app.exitQgis()
+            sys.exit(1)
+        else:
+            print(f"[OK] 等高线图层重投影成功,范围：{contour_layer.extent()}")
+
+        style_path = os.path.join(self.project_path, "等高线图层样式.qml")
+        if os.path.exists(style_path):
+            print(f"加载样式: {style_path}")
+            contour_layer.loadNamedStyle(style_path)
+            contour_layer.triggerRepaint()
+        else:
+            print(f"样式文件不存在: {style_path}")
+
+        extent_map_layer = QgsVectorLayer(self.EXTENT_MAP, "地图范围", "ogr")
+        if not extent_map_layer.isValid():
+            print(f"[错误] 矢量图层加载失败：{self.EXTENT_MAP}")
+            self.qgs_app.exitQgis()
+            sys.exit(1)
+        else:
+            print(f"[OK] 地图范围图层加载成功,范围：{extent_map_layer.extent()}")
+            
+        extent_map_layer = self._reproject_to_3857(extent_map_layer)
+        if not extent_map_layer.isValid():
+            print(f"[错误] 矢量图层重投影失败：{self.EXTENT_MAP}")
+            self.qgs_app.exitQgis()
+            sys.exit(1)
+        else:
+            print(f"[OK] 地图范围图层重投影成功,范围：{extent_map_layer.extent()}")
+
+        # 创建打印项目
+        project_print = QgsProject.instance()
+        project_print.clear()
+        project_print.setCrs(self.crs)
+        print(f"[OK] 打印qgis项目 CRS：{self.crs.authid()}")
+
+        #project_print.addMapLayer(tdt_layer)
+        #project_print.addMapLayer(contour_layer)
+        project_print.addMapLayer(extent_map_layer,False)
+
+        if not os.path.exists(self.QPT_PATH):
+            print(f"[错误] 找不到布局模板：{self.QPT_PATH}")
+            self.qgs_app.exitQgis()
+            sys.exit(1)
+
+        with open(self.QPT_PATH, "r", encoding="utf-8") as f:
+            qpt_xml = f.read()
+
+        doc = QDomDocument()
+        ok, err_msg, err_line, err_col = doc.setContent(qpt_xml)
+
+        if not ok:
+            print(f"[错误] QPT XML 解析失败（第 {err_line} 行，列 {err_col}）：{err_msg}")
+            self.qgs_app.exitQgis()
+            sys.exit(1)
+
+        #layout = QgsPrintLayout(self.project)
+        layout = QgsPrintLayout(project_print)
+        layout.initializeDefaults()
+
+        ctx = QgsReadWriteContext()
+        ctx.setPathResolver(QgsPathResolver(self.QPT_PATH))
+
+        loaded_items, loaded_ok = layout.loadFromTemplate(doc, ctx, True)
+        if not loaded_ok:
+            print("[错误] 布局模板加载失败，请检查 QPT 文件格式")
+            self.qgs_app.exitQgis()
+            sys.exit(1)
+
+        print(f"[OK] {self.QPT_PATH} 布局模板已加载，共 {len(loaded_items)} 个布局项")
+
+        QgsExpressionContextUtils.setLayoutVariable(layout, "Longest_side", self.LONGEST_SIDE)
+        QgsExpressionContextUtils.setLayoutVariable(layout, "Blank_pct", self.BLANK_PCT)
+        QgsExpressionContextUtils.setLayoutVariable(layout, "Border", self.BORDER)
+        print(f"[OK] 布局变量已设置：Longest_side={self.LONGEST_SIDE}, Blank_pct={self.BLANK_PCT}, Border={self.BORDER}")
+
+        map_extent = extent_map_layer.extent()
+        #layers_to_show = [contour_layer]
+        layers_to_show = [contour_layer,tdt_layer]
+
+        map_items_found = 0
+        for item in layout.items():
+            if isinstance(item, QgsLayoutItemMap):
+                map_items_found += 1
+                item.setFollowVisibilityPreset(False)
+                item.setKeepLayerSet(True)
+                item.setLayers(layers_to_show)
+                item.setCrs(extent_map_layer.crs())
+                item.setExtent(map_extent)
+
+        print(f"tif_layer crs: {tdt_layer.crs()}")
+        print(f"gpk_layer crs: {contour_layer.crs()}")
+        print(f"shp_layer crs: {extent_map_layer.crs()}")
+        print(f"map_extent: {map_extent.toString(4)}")
+
+        if map_items_found == 0:
+            print("[警告] 布局模板中未找到地图项（qgsLayoutItemMap）")
+
+        layout.refresh()
+
+        for item in layout.items():
+            if isinstance(item, QgsLayoutItemMap):
+                print(f"[OK] 地图项 '{item.id()}' 实际范围：{item.extent().toString(4)}")
+
+        page = layout.pageCollection().page(0)
+        if page is None:
+            print("[错误] 布局中未找到页面")
+            self.qgs_app.exitQgis()
+            sys.exit(1)
+
+        page_sz = page.pageSize()
+        print(f"[OK] page.pageSize() = {page_sz.width():.2f} x {page_sz.height():.2f} mm")
+
+        all_items = layout.items()
+        if all_items:
+            union_rect = all_items[0].sceneBoundingRect()
+            for it in all_items[1:]:
+                union_rect = union_rect.united(it.sceneBoundingRect())
+            print(f"[OK] 所有元素包围盒（场景mm）：({union_rect.x():.2f},{union_rect.y():.2f}) "
+                  f"{union_rect.width():.2f} x {union_rect.height():.2f} mm")
+        else:
+            union_rect = QRectF(0, 0, page_sz.width(), page_sz.height())
+
+        render_w = max(page_sz.width(), union_rect.right())
+        render_h = max(page_sz.height(), union_rect.bottom())
+        render_rect = QRectF(0, 0, render_w, render_h)
+        print(f"[OK] 最终渲染区域：{render_w:.2f} x {render_h:.2f} mm")
+
+        px_w = int(render_w / 25.4 * self.DPI)
+        px_h = int(render_h / 25.4 * self.DPI)
+        print(f"[OK] 输出像素：{px_w} x {px_h} @ {self.DPI} DPI")
+
+        exporter = QgsLayoutExporter(layout)    
+        image = exporter.renderRegionToImage(render_rect, QSize(px_w, px_h))
+
+        if image.isNull():
+            print("[错误] 渲染失败，返回了空图像（内存不足或布局无效）")
+            self.qgs_app.exitQgis()
+            sys.exit(1)
+
+        os.makedirs(self.OUTPUT, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_png = os.path.join(self.OUTPUT, f"map_{timestamp}.png")
+
+        saved = image.save(output_png, "png")
+        if saved:
+            print(f"[OK] PNG 已保存：{output_png}")
+        else:
+            print(f"[错误] PNG 保存失败，请检查输出目录权限：{self.OUTPUT}")
+
+        self.qgs_app.exitQgis()
 
 if __name__ == "__main__":
     center_lon = 113.370327
@@ -1372,6 +1657,9 @@ if __name__ == "__main__":
         else:
             print("跳过: extent_dem.tif不存在")
         
+        print("\n=== 开始导出地图验证 ===")
+        maker.export_map_by_layout_templet()
+
         print("\n=== 所有测试完成 ===")
         
     except Exception as e:

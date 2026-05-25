@@ -185,11 +185,23 @@ print(f'merged_img的图像尺寸:{merged_img.size}')
 
 # 转换成GeoTIFF
 
+'''
 # 坐标转换
 transformer = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
 x_min_3857, y_min_3857 = transformer.transform(lon_min, lat_min)
 x_max_3857, y_max_3857 = transformer.transform(lon_max, lat_max)
 #
+'''
+# 关键修复：根据实际下载的瓦片范围反算地理坐标
+# 左上角瓦片 (x_min, y_min) 对应的实际地理范围
+top_lat, left_lon = self._num2deg(x_range[0], y_range[0], zoom)
+# 右下角瓦片 (x_max+1, y_max+1) 对应的实际地理范围（+1 是因为瓦片坐标表示左下角）
+bottom_lat, right_lon = self._num2deg(x_range[1] + 1, y_range[1] + 1, zoom)
+        
+# 使用反算出的实际范围计算 GCP 坐标
+transformer = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
+x_min_3857, y_max_3857 = transformer.transform(left_lon, top_lat)    # 左上角
+x_max_3857, y_min_3857 = transformer.transform(right_lon, bottom_lat) # 右下角
 
 # 消除警告 + 明确开启异常（推荐）
 gdal.UseExceptions()

@@ -26,7 +26,7 @@ class MapExporter:
 
     def __init__(self):
         self.project = None
-        self.qgs = None
+        self.qgs_app = None
         self.tif_layer = None
         self.gpk_layer = None
         self.shp_layer = None
@@ -46,8 +46,8 @@ class MapExporter:
 
         qgis_prefix = os.path.join(_conda_prefix, "Library")
         QgsApplication.setPrefixPath(qgis_prefix, True)
-        self.qgs = QgsApplication([], False)
-        self.qgs.initQgis()
+        self.qgs_app = QgsApplication([], False)
+        self.qgs_app.initQgis()
 
         print("[OK] QGIS 环境初始化完成")
 
@@ -121,7 +121,9 @@ class MapExporter:
         return output_layer
 
     def export_map_by_layout_templet(self):
+        style_path = os.path.join(self.PROJECT_DIR, "等高线图层样式.qml")
         
+
         from qgis.core import (
             QgsVectorLayer,
             QgsRasterLayer,
@@ -137,36 +139,62 @@ class MapExporter:
         self.tif_layer = QgsRasterLayer(self.RASTER_FILE_SAT, "天地图-影像地图")
         if not self.tif_layer.isValid():
             print(f"[错误] 栅格图层加载失败：{self.RASTER_FILE_SAT}")
-            self.qgs.exitQgis()
+            self.qgs_app.exitQgis()
             sys.exit(1)
+        else:
+            print(f"[OK] 栅格图层加载成功，范围：{self.tif_layer.extent()}")
 
         self.gpk_layer = QgsVectorLayer(self.VEC_FILE_CONTOUR, "等高线", "ogr")
         if not self.gpk_layer.isValid():
-            self.gpk_layer = QgsVectorLayer(f"{self.VEC_FILE_CONTOUR}|layername=等高线", "等高线", "ogr")
-        if not self.gpk_layer.isValid():
             print(f"[错误] 矢量图层加载失败：{self.VEC_FILE_CONTOUR}")
-            self.qgs.exitQgis()
+            self.qgs_app.exitQgis()
             sys.exit(1)
+        else:
+            print(f"[OK] 等高线图层加载成功，范围：{self.gpk_layer.extent()}")
+        
+        self.gpk_layer = self._reproject_to_3857(self.gpk_layer)
+        if not self.gpk_layer.isValid():
+            print(f"[错误] 矢量图层重投影为 EPSG:3857 失败：{self.VEC_FILE_CONTOUR}")
+            self.qgs_app.exitQgis()
+            sys.exit(1)
+        else:
+            print(f"[OK] 等高线图层加载成功，范围：{self.gpk_layer.extent()}")
 
-        self.project.addMapLayer(self.tif_layer)
-        self.project.addMapLayer(self.gpk_layer)
+        if os.path.exists(style_path):
+            print(f"加载样式: {style_path}")
+            self.gpk_layer.loadNamedStyle(style_path)
+            self.gpk_layer.triggerRepaint()
+        else:
+            print("样式文件不存在，未加载样式")
+
+        #self.project.addMapLayer(self.tif_layer)
+        #self.project.addMapLayer(self.gpk_layer)
 
         self.shp_layer = QgsVectorLayer(self.VEC_FILE_EXTENT, "地图范围", "ogr")
         if not self.shp_layer.isValid():
             print(f"[错误] 矢量图层加载失败：{self.VEC_FILE_EXTENT}")
-            self.qgs.exitQgis()
+            self.qgs_app.exitQgis()
             sys.exit(1)
+        else:
+            print(f"[OK] 地图范围图层加载成功,范围：{self.shp_layer.extent()}")
 
         self.shp_layer = self._reproject_to_3857(self.shp_layer)
+        if not self.shp_layer.isValid():
+            print(f"[错误] 矢量图层重投影为 EPSG:3857 失败：{self.VEC_FILE_EXTENT}")
+            self.qgs_app.exitQgis()
+            sys.exit(1)
+        else:
+            print(f"[OK] 地图范围图层加载成功,范围：{self.shp_layer.extent()}")
+            
         self.project.addMapLayer(self.shp_layer, False)
         print(f"[OK] 已加载图层：{self.tif_layer.name()}、{self.gpk_layer.name()}、{self.shp_layer.name()}（不可见）")
 
-        self.project.setCrs(self.shp_layer.crs())
+        #self.project.setCrs(self.shp_layer.crs())
         print(f"[OK] 项目 CRS：{self.shp_layer.crs().authid()}")
 
         if not os.path.exists(self.QPT_PATH):
             print(f"[错误] 找不到布局模板：{self.QPT_PATH}")
-            self.qgs.exitQgis()
+            self.qgs_app.exitQgis()
             sys.exit(1)
 
         with open(self.QPT_PATH, "r", encoding="utf-8") as f:
@@ -177,7 +205,7 @@ class MapExporter:
 
         if not ok:
             print(f"[错误] QPT XML 解析失败（第 {err_line} 行，列 {err_col}）：{err_msg}")
-            self.qgs.exitQgis()
+            self.qgs_app.exitQgis()
             sys.exit(1)
 
         layout = QgsPrintLayout(self.project)
@@ -189,7 +217,7 @@ class MapExporter:
         loaded_items, loaded_ok = layout.loadFromTemplate(doc, ctx, True)
         if not loaded_ok:
             print("[错误] 布局模板加载失败，请检查 QPT 文件格式")
-            self.qgs.exitQgis()
+            self.qgs_app.exitQgis()
             sys.exit(1)
 
         print(f"[OK] {self.QPT_PATH} 布局模板已加载，共 {len(loaded_items)} 个布局项")
@@ -229,7 +257,9 @@ class MapExporter:
         page = layout.pageCollection().page(0)
         if page is None:
             print("[错误] 布局中未找到页面")
-            self.qgs.exitQgis()
+        if page is None:
+            print("[错误] 布局中未找到页面")
+            self.qgs_app.exitQgis()
             sys.exit(1)
 
         page_sz = page.pageSize()
@@ -259,7 +289,7 @@ class MapExporter:
 
         if image.isNull():
             print("[错误] 渲染失败，返回了空图像（内存不足或布局无效）")
-            self.qgs.exitQgis()
+            self.qgs_app.exitQgis()
             sys.exit(1)
 
         os.makedirs(self.OUTPUT, exist_ok=True)
@@ -272,7 +302,7 @@ class MapExporter:
         else:
             print(f"[错误] PNG 保存失败，请检查输出目录权限：{self.OUTPUT}")
 
-        self.qgs.exitQgis()
+        self.qgs_app.exitQgis()
 
 
 def main():
