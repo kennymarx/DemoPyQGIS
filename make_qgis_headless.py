@@ -26,25 +26,47 @@ class DemMakeQGISHeadless:
         if side_length_km > 10:
             raise ValueError("边长不能大于10km")
         
+        self.project = None
+        self.qgs_app = None
+
         self.center_longitude = center_longitude
         self.center_latitude = center_latitude
         self.side_length_km = side_length_km
         self.project_path = project_path
-        self.OUTPUT = os.path.join(project_path, "output")
-        self.QPT_PATH = os.path.join(project_path, "layoutmodel-new.qpt")
+
+        self.OUTPUT = os.path.join(self.project_path, "output")
+        self.QPT_PATH = os.path.join(self.project_path, "layoutmodel-new.qpt")
+
         self.TIANDITU_MAP = os.path.join(self.project_path, 'map_extent.tif')
+        self.TIANDITU_MAP_LAYER_NAME = "extent_tdt_map"
         self.TIANDITU_MAP_TEMP = os.path.join(self.project_path, 'map_extent_temp.tif')
+
         self.EXTENT_MAP = os.path.join(self.project_path, "地图范围.gpkg")
+
         self.CONTOUR_FILE = os.path.join(self.project_path, "extent_contour.gpkg")
+        self.CONTOUR_LAYER_NAME = "extent_contour"
+
         self.MAP_OSM = os.path.join(self.project_path, 'map.osm')
-        self.project = None
-        self.qgs_app = None
+        self.EXTENT_OSM_LINES = os.path.join(self.project_path, "extent_osm_lines.gpkg")
+        self.EXTENT_OSM_LINES_LAYER_NAME = "extent_osm_lines"
+        self.EXTENT_OSM_POINTS = os.path.join(self.project_path, "extent_osm_points.gpkg")
+        self.EXTENT_OSM_POINTS_LAYER_NAME = "extent_osm_points"
+        self.EXTENT_OSM_MULTIPOLYGONS = os.path.join(self.project_path, "extent_osm_multipolygons.gpkg")
+        self.EXTENT_OSM_MULTIPOLYGONS_LAYER_NAME = "extent_osm_multipolygons"
+        self.EXTENT_OSM_MULTIPOLYGONS = os.path.join(self.project_path, "extent_osm_multipolygons.gpkg")
+        self.EXTENT_OSM_MULTIPOLYGONS_LAYER_NAME = "extent_osm_multipolygons"
+
+        self.EXTENT_DEM = os.path.join(self.project_path, "extent_dem.tif")
+        self.EXTENT_DEM_LAYER_NAME = "extent_dem"
+        self.EXTENT_DEM_HILLSHADOW = os.path.join(self.project_path, "extent_dem_hillshadow.tif")
+        self.EXTENT_DEM_HILLSHADOW_LAYER_NAME = "extent_dem_hillshadow"
+
         self.DPI = 300
         self.LONGEST_SIDE = 1000.0
         self.BLANK_PCT = 0.15
         self.BORDER = 10.0
 
-        os.makedirs(project_path, exist_ok=True)
+        os.makedirs(self.project_path, exist_ok=True)
 
         # 初始化项目资源
         self._copy_resources()
@@ -367,6 +389,7 @@ class DemMakeQGISHeadless:
         print(f"\n拼接完成! 临时图像保存至: {temp_jpg}")
         
         # 关键修复：根据实际下载的瓦片范围反算地理坐标
+        # 因为瓦片拼接后，实际的地理范围会大于下载的瓦片范围（地图范围）
         # 左上角瓦片 (x_min, y_min) 对应的实际地理范围
         top_lat, left_lon = self._num2deg(x_range[0], y_range[0], zoom)
         # 右下角瓦片 (x_max+1, y_max+1) 对应的实际地理范围（+1 是因为瓦片坐标表示左下角）
@@ -1264,9 +1287,89 @@ class DemMakeQGISHeadless:
 
         return output_layer
 
-    # 20260523，天地图影像+等高线
-    def export_map_by_layout_templet(self):
+    def load_raster_layer(self, raster_file, layer_name=None, style_name=""):
+        """
+        加载栅格图层
         
+        参数:
+        raster_file (str): 栅格文件路径
+        
+        返回:
+        QgsRasterLayer: 加载的图层对象，如果失败返回None
+        """
+        from qgis.core import QgsRasterLayer
+        
+        raster_layer = QgsRasterLayer(raster_file, layer_name or os.path.basename(raster_file))
+        if not raster_layer.isValid():
+            print(f"错误: 栅格图层加载失败: {raster_file}")
+            return None
+        else:
+            print(f"加载栅格图层成功: {raster_file}")
+            if style_name:
+                style_path = os.path.join(self.project_path, style_name)
+                if os.path.exists(style_path):
+                    print(f"加载样式: {style_path}")
+                    raster_layer.loadNamedStyle(style_path)
+                    raster_layer.triggerRepaint()
+                else:
+                    print(f"样式文件不存在: {style_path}")
+            else:
+                print(f"未指定样式文件，不加载样式")
+            return raster_layer
+
+    def load_vector_layer(self, vector_file, layer_name=None, style_name=""):
+        """
+        加载矢量图层
+        
+        参数:
+        vector_file (str): 矢量文件路径
+        
+        返回:
+        QgsVectorLayer: 加载的图层对象，如果失败返回None
+        """
+        from qgis.core import QgsVectorLayer
+        
+        vector_layer = QgsVectorLayer(vector_file, layer_name or os.path.basename(vector_file), "ogr")
+        if not vector_layer.isValid():
+            print(f"[错误] 矢量图层加载失败：{vector_file}")
+            self.qgs_app.exitQgis()
+            sys.exit(1)
+        else:
+            print(f"[OK] 矢量图层加载成功,范围：{vector_layer.extent()}")
+     
+        vector_layer = self._reproject_to_3857(vector_layer)
+        if not vector_layer.isValid():
+            print(f"[错误] 矢量图层重投影为 EPSG:3857 失败：{vector_file}")
+            self.qgs_app.exitQgis()
+            sys.exit(1)
+        else:
+            print(f"[OK] 矢量图层重投影成功,范围：{vector_layer.extent()}")
+
+        if style_name:
+            style_path = os.path.join(self.project_path, style_name)
+            if os.path.exists(style_path):
+                print(f"加载样式: {style_path}")
+                vector_layer.loadNamedStyle(style_path)
+                vector_layer.triggerRepaint()
+            else:
+                print(f"样式文件不存在: {style_path}")
+        else:
+            print(f"未指定样式文件，不加载样式")
+        
+        return vector_layer
+        
+
+    # 20260524，改成通用打印模式
+    def export_map_by_layout_templet(self,layers_to_show=[]):
+        """
+        打印地图
+        
+        参数:
+        layers_to_show (list): 要在打印图中显示的图层列表。
+        
+        返回:
+        None
+        """
         from qgis.core import (
             QgsProject,
             QgsPrintLayout,
@@ -1275,45 +1378,24 @@ class DemMakeQGISHeadless:
             QgsExpressionContextUtils, 
             QgsLayoutExporter,
             QgsPathResolver,
-            QgsRasterLayer,
-            QgsVectorLayer,
-            QgsCoordinateReferenceSystem
+            QgsVectorLayer
         )
         from qgis.PyQt.QtXml import QDomDocument
         from qgis.PyQt.QtCore import QSize, QRectF
         
-        tdt_layer = QgsRasterLayer(self.TIANDITU_MAP, "天地图-影像地图")
-        if not tdt_layer.isValid():
-            print(f"[错误] 栅格图层加载失败：{self.TIANDITU_MAP}")
+        if layers_to_show:
+            print(f"[OK] 打印图中显示的图层：{layers_to_show}")
+            # 创建打印项目
+            project_print = QgsProject.instance()
+            project_print.clear()
+            project_print.setCrs(self.crs)
+            print(f"[OK] 打印qgis项目 CRS：{self.crs.authid()}")
+        else:
+            print(f"[错误] 打印图中显示的图层为空")
             self.qgs_app.exitQgis()
             sys.exit(1)
-        else:
-            print(f"[OK] 栅格图层加载成功,范围：{tdt_layer.extent()}")
 
-        contour_layer = QgsVectorLayer(self.CONTOUR_FILE, "等高线", "ogr")
-        if not contour_layer.isValid():
-            print(f"[错误] 矢量图层加载失败：{self.CONTOUR_FILE}")
-            self.qgs_app.exitQgis()
-            sys.exit(1)
-        else:
-            print(f"[OK] 等高线图层加载成功,范围：{contour_layer.extent()}")
-     
-        contour_layer = self._reproject_to_3857(contour_layer)
-        if not contour_layer.isValid():
-            print(f"[错误] 矢量图层重投影为 EPSG:3857 失败：{self.CONTOUR_FILE}")
-            self.qgs_app.exitQgis()
-            sys.exit(1)
-        else:
-            print(f"[OK] 等高线图层重投影成功,范围：{contour_layer.extent()}")
-
-        style_path = os.path.join(self.project_path, "等高线图层样式.qml")
-        if os.path.exists(style_path):
-            print(f"加载样式: {style_path}")
-            contour_layer.loadNamedStyle(style_path)
-            contour_layer.triggerRepaint()
-        else:
-            print(f"样式文件不存在: {style_path}")
-
+        # 加载地图范围图层
         extent_map_layer = QgsVectorLayer(self.EXTENT_MAP, "地图范围", "ogr")
         if not extent_map_layer.isValid():
             print(f"[错误] 矢量图层加载失败：{self.EXTENT_MAP}")
@@ -1330,24 +1412,20 @@ class DemMakeQGISHeadless:
         else:
             print(f"[OK] 地图范围图层重投影成功,范围：{extent_map_layer.extent()}")
 
-        # 创建打印项目
-        project_print = QgsProject.instance()
-        project_print.clear()
-        project_print.setCrs(self.crs)
-        print(f"[OK] 打印qgis项目 CRS：{self.crs.authid()}")
-
-        #project_print.addMapLayer(tdt_layer)
-        #project_print.addMapLayer(contour_layer)
+        # 只需要在打印图项目中添加地图范围。
         project_print.addMapLayer(extent_map_layer,False)
 
         if not os.path.exists(self.QPT_PATH):
             print(f"[错误] 找不到布局模板：{self.QPT_PATH}")
             self.qgs_app.exitQgis()
             sys.exit(1)
+        else:
+            print(f"[OK] 找到布局模板：{self.QPT_PATH}")
 
         with open(self.QPT_PATH, "r", encoding="utf-8") as f:
             qpt_xml = f.read()
-
+        
+        print(f"已读取布局模板内容")
         doc = QDomDocument()
         ok, err_msg, err_line, err_col = doc.setContent(qpt_xml)
 
@@ -1356,9 +1434,9 @@ class DemMakeQGISHeadless:
             self.qgs_app.exitQgis()
             sys.exit(1)
 
-        #layout = QgsPrintLayout(self.project)
         layout = QgsPrintLayout(project_print)
         layout.initializeDefaults()
+        print(f"已初始化布局模板: {self.QPT_PATH}")
 
         ctx = QgsReadWriteContext()
         ctx.setPathResolver(QgsPathResolver(self.QPT_PATH))
@@ -1376,10 +1454,9 @@ class DemMakeQGISHeadless:
         QgsExpressionContextUtils.setLayoutVariable(layout, "Border", self.BORDER)
         print(f"[OK] 布局变量已设置：Longest_side={self.LONGEST_SIDE}, Blank_pct={self.BLANK_PCT}, Border={self.BORDER}")
 
+        # 设置打印范围
         map_extent = extent_map_layer.extent()
-        #layers_to_show = [contour_layer]
-        layers_to_show = [contour_layer,tdt_layer]
-
+        
         map_items_found = 0
         for item in layout.items():
             if isinstance(item, QgsLayoutItemMap):
@@ -1450,7 +1527,7 @@ class DemMakeQGISHeadless:
         else:
             print(f"[错误] PNG 保存失败，请检查输出目录权限：{self.OUTPUT}")
 
-        self.qgs_app.exitQgis()
+        return True
 
 if __name__ == "__main__":
     center_lon = 113.370327
@@ -1658,7 +1735,24 @@ if __name__ == "__main__":
             print("跳过: extent_dem.tif不存在")
         
         print("\n=== 开始导出地图验证 ===")
-        maker.export_map_by_layout_templet()
+        # 影像地图+等高线
+        tdt_layer = maker.load_raster_layer(maker.TIANDITU_MAP, maker.TIANDITU_MAP_LAYER_NAME)
+        contour_layer = maker.load_vector_layer(maker.CONTOUR_FILE, maker.CONTOUR_LAYER_NAME,"等高线图层样式.qml")
+        maker.export_map_by_layout_templet(layers_to_show=[contour_layer,tdt_layer])
+
+        # OSM地图+等高线+山体阴影+DEM高程渲染层
+        osm_points_layer = maker.load_vector_layer(maker.EXTENT_OSM_POINTS, maker.EXTENT_OSM_POINTS_LAYER_NAME,"POI图层样式.qml")
+        #osm_points_layer = maker.load_vector_layer(maker.EXTENT_OSM_POINTS, maker.EXTENT_OSM_POINTS_LAYER_NAME)
+        osm_lines_layer = maker.load_vector_layer(maker.EXTENT_OSM_LINES, maker.EXTENT_OSM_LINES_LAYER_NAME,"线图层样式.qml")
+        #osm_lines_layer = maker.load_vector_layer(maker.EXTENT_OSM_LINES, maker.EXTENT_OSM_LINES_LAYER_NAME)
+        osm_multipolygons_layer = maker.load_vector_layer(maker.EXTENT_OSM_MULTIPOLYGONS, maker.EXTENT_OSM_MULTIPOLYGONS_LAYER_NAME,"面图层样式.qml")
+        #osm_multipolygons_layer = maker.load_vector_layer(maker.EXTENT_OSM_MULTIPOLYGONS, maker.EXTENT_OSM_MULTIPOLYGONS_LAYER_NAME)
+
+        dem_layer = maker.load_raster_layer(maker.EXTENT_DEM, maker.EXTENT_DEM_LAYER_NAME,"高程渲染层样式.qml")
+        dem_hillshade_layer = maker.load_raster_layer(maker.EXTENT_DEM_HILLSHADOW, maker.EXTENT_DEM_HILLSHADOW_LAYER_NAME,"山体阴影样式.qml")
+        maker.export_map_by_layout_templet(layers_to_show=[contour_layer,
+             osm_points_layer,osm_lines_layer,osm_multipolygons_layer,
+             dem_hillshade_layer,dem_layer])
 
         print("\n=== 所有测试完成 ===")
         
