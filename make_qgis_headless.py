@@ -35,13 +35,19 @@ class DemMakeQGISHeadless:
         self.project_path = project_path
 
         self.OUTPUT = os.path.join(self.project_path, "output")
-        self.QPT_PATH = os.path.join(self.project_path, "layoutmodel-new.qpt")
+        self.RESOURCES_PATH = os.path.join(self.project_path, "resources")
+
+        self.GPKG_EXTENT_4326 = os.path.join(self.project_path, "地图范围_4326.gpkg")
+        self.GPKG_EXTENT_3857 = os.path.join(self.project_path, "地图范围_3857.gpkg")
+
+        self.PRINT_MODEL_PATH = os.path.join(self.RESOURCES_PATH, "printModel")
+        self.QPT_PATH = os.path.join(self.PRINT_MODEL_PATH, "layoutmodel2.qpt")
+
+        self.TEMPLATE_PATH = os.path.join(self.RESOURCES_PATH, "template")
 
         self.TIANDITU_MAP = os.path.join(self.project_path, 'map_extent.tif')
         self.TIANDITU_MAP_LAYER_NAME = "extent_tdt_map"
         self.TIANDITU_MAP_TEMP = os.path.join(self.project_path, 'map_extent_temp.tif')
-
-        self.EXTENT_MAP = os.path.join(self.project_path, "地图范围.gpkg")
 
         self.CONTOUR_FILE = os.path.join(self.project_path, "extent_contour.gpkg")
         self.CONTOUR_LAYER_NAME = "extent_contour"
@@ -122,26 +128,20 @@ class DemMakeQGISHeadless:
         # 当前脚本的位置
         current_dir = os.path.dirname(os.path.abspath(__file__))
         resources_dir = os.path.join(current_dir, "resources")
+        dst_resources_dir = os.path.join(self.project_path, "resources")
     
-        # 拷贝资源目录下的所有文件到项目目录
-        print(f"拷贝资源目录 {resources_dir} 到项目目录 {self.project_path}")
-        # 拷贝资源目录下的所有文件到项目目录
-        # 遍历资源目录，逐个拷贝/覆盖
-        for item in os.listdir(resources_dir):
-            src_path = os.path.join(resources_dir, item)
-            dst_path = os.path.join(self.project_path, item)
-            
-            try:
-                if os.path.isdir(src_path):
-                    # 如果是文件夹，递归拷贝（存在则覆盖）
-                    if os.path.exists(dst_path):
-                        shutil.rmtree(dst_path)
-                    shutil.copytree(src_path, dst_path)
-                else:
-                    # 如果是文件，直接拷贝覆盖
-                    shutil.copy2(src_path, dst_path)
-            except Exception as e:
-                print(f"拷贝 {item} 失败：{e}")
+        # 拷贝资源目录到项目目录，保持原目录结构
+        print(f"拷贝资源目录 {resources_dir} 到项目目录 {dst_resources_dir}")
+        
+        try:
+            # 如果目标目录已存在，先删除
+            if os.path.exists(dst_resources_dir):
+                shutil.rmtree(dst_resources_dir)
+            # 递归拷贝整个资源目录（包括目录本身及其所有内容）
+            shutil.copytree(resources_dir, dst_resources_dir)
+            print("资源目录拷贝完成")
+        except Exception as e:
+            print(f"拷贝资源目录失败：{e}")
     
     def _calculate_boundary_points(self):
         from qgis.core import QgsDistanceArea, QgsPointXY
@@ -185,7 +185,7 @@ class DemMakeQGISHeadless:
     
     def add_map_extent_layer(self):
         """
-        加载"地图范围.gpkg"图层，并运用"地图范围样式.qml"样式文件，然后添加到qgis项目中
+        加载"地图范围"图层，并运用"地图范围样式.qml"样式文件，然后添加到qgis项目中
         
         返回:
         bool: 成功返回True，失败返回False
@@ -196,22 +196,25 @@ class DemMakeQGISHeadless:
             print("错误: 项目未创建")
             return False
 
-        gpkg_path = os.path.join(self.project_path, "地图范围.gpkg")
 
-        self._create_gpkg_file(gpkg_path)
+        self._create_extent_layer_4326(self.GPKG_EXTENT_4326)
+        
+        self._create_extent_layer_3857(self.GPKG_EXTENT_3857)
 
         for layer in self.project.mapLayers().values():
             if layer.name() == "地图范围":
                 print("地图范围图层已存在，跳过添加")
                 return True
 
-        polygon_layer = QgsVectorLayer(gpkg_path, "地图范围", 'ogr')
-
+        polygon_layer = QgsVectorLayer(self.GPKG_EXTENT_3857, "地图范围", 'ogr')
         if not polygon_layer.isValid():
-            print("加载gpkg文件失败")
-            return False
+            print(f"[错误] 矢量图层加载失败：{polygon_layer}")
+            self.qgs_app.exitQgis()
+            sys.exit(1)
+        else:
+            print(f"[OK] 矢量图层加载成功,范围：{polygon_layer.extent()}")
 
-        style_path = os.path.join(self.project_path, "地图范围样式.qml")
+        style_path = os.path.join(self.TEMPLATE_PATH, "地图范围样式.qml")
 
         if os.path.exists(style_path):
             print(f"加载样式: {style_path}")
@@ -232,7 +235,7 @@ class DemMakeQGISHeadless:
 
         return project_file_path
     
-    def _create_gpkg_file(self, gpkg_path):
+    def _create_extent_layer_4326(self, gpkg_path):
         from qgis.core import QgsVectorLayer, QgsField, QgsGeometry, QgsFeature, QgsVectorFileWriter
         
         temp_layer = QgsVectorLayer("polygon?crs=epsg:4326", "地图范围", "memory")
@@ -272,14 +275,61 @@ class DemMakeQGISHeadless:
             options
         )
     
+    def _create_extent_layer_3857(self, gpkg_path):
+        from qgis.core import QgsVectorLayer, QgsField, QgsGeometry, QgsFeature, QgsVectorFileWriter, QgsCoordinateReferenceSystem, QgsCoordinateTransform
+        
+        temp_layer = QgsVectorLayer("polygon?crs=epsg:3857", "地理范围_3857", "memory")
+        
+        if not temp_layer.isValid():
+            raise RuntimeError("3857图层创建失败")
+        
+        temp_layer.startEditing()
+        
+        temp_layer.dataProvider().addAttributes([
+            QgsField("id", QMetaType.Type.Int)
+        ])
+        temp_layer.updateFields()
+        
+        boundary_points_4326 = self._calculate_boundary_points()
+        boundary_points_4326.append(boundary_points_4326[0])
+        
+        crs_4326 = QgsCoordinateReferenceSystem("EPSG:4326")
+        crs_3857 = QgsCoordinateReferenceSystem("EPSG:3857")
+        transform = QgsCoordinateTransform(crs_4326, crs_3857, self.project)
+        
+        boundary_points_3857 = [transform.transform(point) for point in boundary_points_4326]
+        
+        polygon = QgsGeometry.fromPolygonXY([boundary_points_3857])
+        
+        feature = QgsFeature()
+        feature.setGeometry(polygon)
+        feature.setAttributes([1])
+        temp_layer.dataProvider().addFeature(feature)
+        
+        temp_layer.updateExtents()
+        temp_layer.commitChanges()
+        
+        options = QgsVectorFileWriter.SaveVectorOptions()
+        options.driverName = "GPKG"
+        options.fileEncoding = "UTF-8"
+        transform_context = self.project.transformContext()
+        
+        QgsVectorFileWriter.writeAsVectorFormatV3(
+            temp_layer,
+            gpkg_path,
+            transform_context,
+            options
+        )
+        print(f"3857地理范围图层已生成: {gpkg_path}")
+
     def _check_gpkg_exists(self):
-        gpkg_path = os.path.join(self.project_path, "地图范围.gpkg")
-        return os.path.exists(gpkg_path)
+        
+        return os.path.exists(self.GPKG_EXTENT_4326)
     
     def _get_gpkg_extent(self):
         from qgis.core import QgsVectorLayer
-        gpkg_path = os.path.join(self.project_path, "地图范围.gpkg")
-        layer = QgsVectorLayer(gpkg_path, "temp", "ogr")
+
+        layer = QgsVectorLayer(self.GPKG_EXTENT_4326, "temp", "ogr")
         if not layer.isValid():
             raise RuntimeError("加载gpkg文件失败")
         extent = layer.extent()
@@ -444,7 +494,7 @@ class DemMakeQGISHeadless:
             return self.TIANDITU_MAP
 
         if not self._check_gpkg_exists():
-            raise RuntimeError("地图范围.gpkg不存在，请先创建")
+            raise RuntimeError(f"{self.GPKG_EXTENT_4326}不存在，请先创建")
         print("\n=== 开始下载天地图影像 ===")
         extent = self._get_gpkg_extent()
         tif_path = self._download_tianditu_tiles(
@@ -476,7 +526,7 @@ class DemMakeQGISHeadless:
             return self.MAP_OSM
 
         if not self._check_gpkg_exists():
-            raise RuntimeError("地图范围.gpkg不存在，请先创建")
+            raise RuntimeError(f"{self.GPKG_EXTENT_4326}不存在，请先创建")
         
         extent = self._get_gpkg_extent()
         min_lon = extent['lon_min']
@@ -675,7 +725,7 @@ class DemMakeQGISHeadless:
         将OSM图层与地图范围图层进行相交运算，只保留落在地图范围内的OSM数据
         
         参数:
-        extent_gpkg (str): 地图范围GPKG文件路径，默认为项目目录下的"地图范围.gpkg"
+        extent_gpkg (str): 地图范围GPKG文件路径，默认为项目目录下的"地图范围"
         osm_layers (dict): OSM图层字典，key为类型名，value为图层文件路径
                           默认为项目目录下的osm_points.gpkg, osm_lines.gpkg, osm_multipolygons.gpkg
         
@@ -688,7 +738,7 @@ class DemMakeQGISHeadless:
         print("\n=== 开始OSM图层与地图范围相交运算 ===")
         
         if extent_gpkg is None:
-            extent_gpkg = os.path.join(self.project_path, "地图范围.gpkg")
+            extent_gpkg = self.GPKG_EXTENT_4326
         
         if not os.path.exists(extent_gpkg):
             print(f"错误: 地图范围文件不存在: {extent_gpkg}")
@@ -799,9 +849,9 @@ class DemMakeQGISHeadless:
             }
         
         style_map = {
-            'points': 'POI图层样式.qml',
-            'lines': '线图层样式.qml',
-            'multipolygons': '面图层样式.qml'
+            'points': os.path.join(self.TEMPLATE_PATH, 'POI图层样式.qml'),
+            'lines': os.path.join(self.TEMPLATE_PATH, '线图层样式.qml'),
+            'multipolygons': os.path.join(self.TEMPLATE_PATH, '面图层样式.qml') 
         }
         
         added_layers = []
@@ -855,7 +905,7 @@ class DemMakeQGISHeadless:
         
         参数:
         dem_files_dir (str): DEM文件所在目录，默认为脚本目录下的dem_files文件夹
-        extent_gpkg (str): 地图范围GPKG文件路径，默认为项目目录下的"地图范围.gpkg"
+        extent_gpkg (str): 地图范围GPKG文件路径，默认为项目目录下的"地图范围"
         
         返回:
         str: 裁剪后的DEM文件路径，如果失败返回None
@@ -869,7 +919,7 @@ class DemMakeQGISHeadless:
             dem_files_dir = os.path.join(current_dir, "dem_files")
         
         if extent_gpkg is None:
-            extent_gpkg = os.path.join(self.project_path, "地图范围.gpkg")
+            extent_gpkg = self.GPKG_EXTENT_4326
         
         if not os.path.exists(dem_files_dir):
             print(f"错误: DEM文件目录不存在: {dem_files_dir}")
@@ -1044,7 +1094,7 @@ class DemMakeQGISHeadless:
             print(f"加载图层失败: {contour_file}")
             return None
         
-        style_path = os.path.join(self.project_path, "等高线图层样式.qml")
+        style_path = os.path.join(self.TEMPLATE_PATH, "等高线图层样式.qml")
         if os.path.exists(style_path):
             print(f"加载样式: {style_path}")
             layer.loadNamedStyle(style_path)
@@ -1102,7 +1152,7 @@ class DemMakeQGISHeadless:
             print(f"加载图层失败: {dem_file}")
             return None
         
-        style_path = os.path.join(self.project_path, "高程渲染层样式.qml")
+        style_path = os.path.join(self.TEMPLATE_PATH, "高程渲染层样式.qml")
         if os.path.exists(style_path):
             print(f"加载样式: {style_path}")
             layer.loadNamedStyle(style_path)
@@ -1213,7 +1263,7 @@ class DemMakeQGISHeadless:
             print(f"加载图层失败: {hillshade_file}")
             return None
 
-        style_path = os.path.join(self.project_path, "山体阴影样式.qml")
+        style_path = os.path.join(self.TEMPLATE_PATH, "山体阴影样式.qml")
         if os.path.exists(style_path):
             print(f"加载样式: {style_path}")
             layer.loadNamedStyle(style_path)
@@ -1272,7 +1322,7 @@ class DemMakeQGISHeadless:
             output_features.append(new_feat)
 
         output_layer.dataProvider().addFeatures(output_features)
-
+        '''
         options = QgsVectorFileWriter.SaveVectorOptions()
         options.driverName = "GPKG"
         options.fileEncoding = "UTF-8"
@@ -1284,7 +1334,7 @@ class DemMakeQGISHeadless:
             transform_context,
             options
         )
-
+        '''
         return output_layer
 
     def load_raster_layer(self, raster_file, layer_name=None, style_name=""):
@@ -1306,7 +1356,7 @@ class DemMakeQGISHeadless:
         else:
             print(f"加载栅格图层成功: {raster_file}")
             if style_name:
-                style_path = os.path.join(self.project_path, style_name)
+                style_path = os.path.join(self.TEMPLATE_PATH, style_name)
                 if os.path.exists(style_path):
                     print(f"加载样式: {style_path}")
                     raster_layer.loadNamedStyle(style_path)
@@ -1346,7 +1396,7 @@ class DemMakeQGISHeadless:
             print(f"[OK] 矢量图层重投影成功,范围：{vector_layer.extent()}")
 
         if style_name:
-            style_path = os.path.join(self.project_path, style_name)
+            style_path = os.path.join(self.TEMPLATE_PATH, style_name)
             if os.path.exists(style_path):
                 print(f"加载样式: {style_path}")
                 vector_layer.loadNamedStyle(style_path)
@@ -1396,9 +1446,9 @@ class DemMakeQGISHeadless:
             sys.exit(1)
 
         # 加载地图范围图层
-        extent_map_layer = QgsVectorLayer(self.EXTENT_MAP, "地图范围", "ogr")
+        extent_map_layer = QgsVectorLayer(self.GPKG_EXTENT_3857, "地图范围", "ogr")
         if not extent_map_layer.isValid():
-            print(f"[错误] 矢量图层加载失败：{self.EXTENT_MAP}")
+            print(f"[错误] 矢量图层加载失败：{self.GPKG_EXTENT_3857}")
             self.qgs_app.exitQgis()
             sys.exit(1)
         else:
@@ -1406,7 +1456,7 @@ class DemMakeQGISHeadless:
             
         extent_map_layer = self._reproject_to_3857(extent_map_layer)
         if not extent_map_layer.isValid():
-            print(f"[错误] 矢量图层重投影失败：{self.EXTENT_MAP}")
+            print(f"[错误] 矢量图层重投影失败：{self.GPKG_EXTENT_3857}")
             self.qgs_app.exitQgis()
             sys.exit(1)
         else:
@@ -1561,7 +1611,7 @@ if __name__ == "__main__":
         
         print("\n=== 开始天地图下载验证 ===")
         if maker._check_gpkg_exists():
-            print("地图范围.gpkg存在，开始下载天地图...")
+            print(f"地图范围:{maker.GPKG_EXTENT_4326}存在，开始下载天地图...")
             tif_path = maker.download_and_add_tianditu(zoom_level=14)
             
             if os.path.exists(tif_path):
@@ -1574,12 +1624,12 @@ if __name__ == "__main__":
             else:
                 print("验证失败: 地图范围-天地图.tif 未创建!")
         else:
-            print("验证失败: 地图范围.gpkg 不存在!")
+            print(f"验证失败: {self.GPKG_EXTENT_4326} 不存在!")
         
         print("\n=== 开始OSM数据下载验证 ===")
         osm_path = None
         if maker._check_gpkg_exists():
-            print("地图范围.gpkg存在，开始下载OSM数据...")
+            print(f"地图范围:{maker.GPKG_EXTENT_4326}存在，开始下载OSM数据...")
             osm_path = maker.download_osm_data()
             
             if osm_path and os.path.exists(osm_path):
@@ -1588,7 +1638,7 @@ if __name__ == "__main__":
             else:
                 print("验证失败: OSM数据下载失败!")
         else:
-            print("验证失败: 地图范围.gpkg 不存在!")
+            print(f"验证失败: {maker.GPKG_EXTENT_4326} 不存在!")
         
         print("\n=== 开始OSM数据提取验证 ===")
         gpkg_files = []
@@ -1626,11 +1676,10 @@ if __name__ == "__main__":
             'lines': os.path.join(project_dir, 'osm_lines.gpkg'),
             'multipolygons': os.path.join(project_dir, 'osm_multipolygons.gpkg')
         }
-        extent_gpkg = os.path.join(project_dir, "地图范围.gpkg")
 
-        if all(os.path.exists(f) for f in osm_gpkg_files.values()) and os.path.exists(extent_gpkg):
-            print("OSM图层文件和地图范围文件都存在，开始相交运算...")
-            extent_osm_files = maker.intersect_osm_with_extent(extent_gpkg=extent_gpkg, osm_layers=osm_gpkg_files)
+        if all(os.path.exists(f) for f in osm_gpkg_files.values()) and os.path.exists(maker.GPKG_EXTENT_4326):
+            print(f"OSM图层文件和地图范围:{maker.GPKG_EXTENT_4326}都存在，开始相交运算...")
+            extent_osm_files = maker.intersect_osm_with_extent(extent_gpkg=maker.GPKG_EXTENT_4326, osm_layers=osm_gpkg_files)
 
             if extent_osm_files:
                 print(f"验证成功: 已生成 {len(extent_osm_files)} 个extent_osm文件")
@@ -1657,11 +1706,10 @@ if __name__ == "__main__":
         
         print("\n=== 开始DEM影像裁剪验证 ===")
         dem_files_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dem_files")
-        extent_gpkg = os.path.join(project_dir, "地图范围.gpkg")
         
-        if os.path.exists(dem_files_dir) and os.path.exists(extent_gpkg):
-            print("DEM目录和地图范围文件都存在，开始裁剪DEM...")
-            extent_dem = maker.extract_dem_by_extent(dem_files_dir=dem_files_dir, extent_gpkg=extent_gpkg)
+        if os.path.exists(dem_files_dir) and os.path.exists(maker.GPKG_EXTENT_4326):
+            print(f"DEM目录和地图范围:{maker.GPKG_EXTENT_4326}都存在，开始裁剪DEM...")
+            extent_dem = maker.extract_dem_by_extent(dem_files_dir=dem_files_dir, extent_gpkg=maker.GPKG_EXTENT_4326)
             
             if extent_dem and os.path.exists(extent_dem):
                 print(f"验证成功: {os.path.basename(extent_dem)} 已生成")
