@@ -121,7 +121,7 @@ class MapExporter:
         return output_layer
 
     def export_map_by_layout_templet(self):
-        style_path = os.path.join(self.PROJECT_DIR, "等高线图层样式.qml")
+        style_path = os.path.join(self.TEMPLATE_PATH, "等高线图层样式.qml")
         
 
         from qgis.core import (
