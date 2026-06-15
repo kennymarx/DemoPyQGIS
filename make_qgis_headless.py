@@ -6,6 +6,8 @@ import time
 import requests
 import subprocess
 import argparse
+import gpxpy
+import gpxpy.gpx
 from PyQt5.QtCore import QMetaType
 from shapely.validation import make_valid
 from datetime import datetime
@@ -24,8 +26,8 @@ TIANDITU_WMTS_URL = f'http://t0.tianditu.gov.cn/img_w/wmts?tk={TIANDITU_TK}'
 
 class DemMakeQGISHeadless:
     def __init__(self, center_longitude, center_latitude, side_length_km, project_path):
-        if side_length_km > 10:
-            raise ValueError("边长不能大于10km")
+        if side_length_km > 30:
+            raise ValueError("边长不能大于30km")
         
         self.project = None
         self.qgs_app = None
@@ -1818,6 +1820,102 @@ def point_to_map(center_lon, center_lat, side_length, project_dir):
         traceback.print_exc()
         return False
 
+# 使用Haversine公式计算两点之间的距离
+def haversine_distance(lon1, lat1, lon2, lat2):
+    """计算两点之间的距离（米）"""
+    R = 6371000  # 地球半径（米）
+    d_lat = math.radians(lat2 - lat1)
+    d_lon = math.radians(lon2 - lon1)
+    a = math.sin(d_lat/2) * math.sin(d_lat/2) + \
+            math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * \
+            math.sin(d_lon/2) * math.sin(d_lon/2)
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+    return R * c
+
+def gpx_to_map(gpx_file_path, project_dir):
+    """
+    根据GPX轨迹文件生成地图项目
+    
+    Args:
+        gpx_file_path (str): GPX文件路径
+        project_dir (str): 项目目录路径
+        
+    Returns:
+        bool: 是否成功完成
+    """
+    print(f"=== 开始GPX轨迹处理 ===")
+    print(f"GPX文件路径: {gpx_file_path}")
+    print(f"项目目录: {project_dir}")
+    
+    try:
+        # 1. 读取GPX文件
+        with open(gpx_file_path, 'r', encoding='utf-8') as f:
+            gpx = gpxpy.parse(f)
+        
+        # 2. 提取所有轨迹点
+        all_points = []
+        for track in gpx.tracks:
+            for segment in track.segments:
+                for point in segment.points:
+                    all_points.append((point.longitude, point.latitude))
+        
+        if not all_points:
+            print("错误: GPX文件中没有找到轨迹点")
+            return False
+        
+        # 3. 计算中心点
+        lons = [p[0] for p in all_points]
+        lats = [p[1] for p in all_points]
+        
+        center_lon = sum(lons) / len(lons)
+        center_lat = sum(lats) / len(lats)
+        
+        print(f"中心点坐标: ({center_lon:.6f}, {center_lat:.6f})")
+        
+        # 4. 计算中心点到轨迹各点的最大距离（东西南北四个方向）
+        max_distance = 0
+        for lon, lat in all_points:
+            distance = haversine_distance(center_lon, center_lat, lon, lat)
+            if distance > max_distance:
+                max_distance = distance
+        
+        print(f"中心点到轨迹的最大距离: {max_distance:.2f} 米")
+        
+        # 5. 计算half_edge
+        # 最大距离 + 500米，然后四舍五入到至少百米
+        half_edge_raw = max_distance + 500
+        
+        # 四舍五入到百米（100米的倍数）
+        half_edge = round(half_edge_raw / 100) * 100
+        
+        print(f"half_edge计算: {max_distance:.2f} + 500 = {half_edge_raw:.2f} → 四舍五入后 {half_edge} 米")
+        
+        # 6. 计算边长（单位：公里）
+        side_length_km = (2 * half_edge) / 1000
+        
+        print(f"生成的地图边长: {side_length_km:.2f} 公里")
+        
+        # 7. 创建项目目录
+        os.makedirs(project_dir, exist_ok=True)
+        
+        # 8. 调用point_to_map生成地图
+        print("\n=== 开始生成地图项目 ===")
+        success = point_to_map(center_lon, center_lat, side_length_km, project_dir)
+        
+        if success:
+            print(f"\n=== GPX轨迹地图生成完成 ===")
+            print(f"中心点: ({center_lon:.6f}, {center_lat:.6f})")
+            print(f"边长: {side_length_km:.2f} 公里")
+            print(f"项目目录: {project_dir}")
+        
+        return success
+        
+    except Exception as e:
+        print(f"GPX处理失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
 def main_point_to_map():
     """命令行入口函数"""
     parser = argparse.ArgumentParser(
@@ -1875,5 +1973,6 @@ def main_point_to_map():
     sys.exit(0 if success else 1)
 
 if __name__ == "__main__":
-    main_point_to_map()
+    # main_point_to_map()
+    gpx_to_map(r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto01\2024-03-03 07 57 火北帽.gpx", r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto01")
 
