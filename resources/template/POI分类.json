@@ -1,0 +1,42 @@
+{
+    "author": "Tabris",
+    "exported_at": "2023-12-27T16:41:06",
+    "expressions": [
+        {
+            "description": "<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.0//EN\" \"http://www.w3.org/TR/REC-html40/strict.dtd\">\n<html><head><style type=\"text/css\">\np, li { white-space: pre-wrap; }\n</style></head><body style=\" font-family:'SimSun'; font-size:9pt; font-weight:400; font-style:normal;\">\n<p style=\"-qt-paragraph-type:empty; margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;\"><br /></p></body></html>",
+            "expression": "case when  \"other_tags\" ='\"power\"=>\"tower\"' then '电塔'\r\nwhen \"highway\"='bus_stop' then '站点'\r\nwhen \"other_tags\" like '%\"natural\"=>\"peak\"%' then '山峰'\r\nwhen \"name\" like '%公厕%' or \"other_tags\" like '%toilet%' then '公厕'\r\nwhen \"highway\" is NULL and \"other_tags\" like '%\"parking\"%' then '停车场'\r\nwhen \"highway\" is NULL and \"other_tags\" like '%\"fuel\"%' then '油站'\r\nwhen \"highway\" is NULL and (\"other_tags\" like '%\"police\"%' or \"other_tags\" like '%\"fire_station\"%') then '公安'\r\nwhen \"highway\" is NULL and (\"other_tags\" like '%\"hospital\"%' or \"other_tags\" like '%\"clinic\"%' or \"other_tags\" like '%healthcare=>\"yes\"%') then '医院'\r\nwhen \"highway\" is NULL and \"other_tags\" like '%\"government\"%' then '机关'\r\nwhen \"place\" <>'NULL' then '其他'\r\nend",
+            "group": "user",
+            "name": "POI分类",
+            "type": "expression"
+        },
+        {
+            "description": "<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.0//EN\" \"http://www.w3.org/TR/REC-html40/strict.dtd\">\n<html><head><style type=\"text/css\">\np, li { white-space: pre-wrap; }\n</style></head><body style=\" font-family:'SimSun'; font-size:9pt; font-weight:400; font-style:normal;\">\n<p style=\"-qt-paragraph-type:empty; margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;\"><br /></p></body></html>",
+            "expression": "to_string(floor( \"left\" ))+'°'+to_string(floor( (\"left\" -floor( \"left\" ))*60))+''''+to_string(round(((\"left\" -floor( \"left\" ))*60-floor((\"left\" -floor( \"left\" ))*60))*60,2))+'\"'",
+            "group": "user",
+            "name": "经纬网度分秒显示",
+            "type": "expression"
+        },
+        {
+            "description": "<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.0//EN\" \"http://www.w3.org/TR/REC-html40/strict.dtd\">\n<html><head><style type=\"text/css\">\np, li { white-space: pre-wrap; }\n</style></head><body style=\" font-family:'SimSun'; font-size:9pt; font-weight:400; font-style:normal;\">\n<p style=\"-qt-paragraph-type:empty; margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;\"><br /></p></body></html>",
+            "expression": "to_string(floor( \"left\" ))+'°'+to_string(floor( (\"left\" -floor( \"left\" ))*60))+''''+to_string(round(((\"left\" -floor( \"left\" ))*60-floor((\"left\" -floor( \"left\" ))*60))*60,2))+'\"'",
+            "group": "user",
+            "name": "经纬网度分秒显示（纬度）",
+            "type": "expression"
+        },
+        {
+            "description": "<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.0//EN\" \"http://www.w3.org/TR/REC-html40/strict.dtd\">\n<html><head><style type=\"text/css\">\np, li { white-space: pre-wrap; }\n</style></head><body style=\" font-family:'SimSun'; font-size:9pt; font-weight:400; font-style:normal;\">\n<p style=\"-qt-paragraph-type:empty; margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;\"><br /></p></body></html>",
+            "expression": "to_string(floor( \"left\" ))+'°'+to_string(floor( (\"left\" -floor( \"left\" ))*60))+''''+to_string(round(((\"left\" -floor( \"left\" ))*60-floor((\"left\" -floor( \"left\" ))*60))*60,2))+'\"'\r\nto_string(floor( \"top\" ))+'°'+to_string(floor( (\"top\" -floor( \"top\" ))*60))+''''+to_string(round(((\"top\" -floor( \"top\" ))*60-floor((\"top\" -floor( \"top\" ))*60))*60,2))+'\"'",
+            "group": "user",
+            "name": "经纬网格度分秒显示",
+            "type": "expression"
+        },
+        {
+            "description": "<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.0//EN\" \"http://www.w3.org/TR/REC-html40/strict.dtd\">\n<html><head><style type=\"text/css\">\np, li { white-space: pre-wrap; }\n</style></head><body style=\" font-family:'SimSun'; font-size:9pt; font-weight:400; font-style:normal;\">\n<p style=\"-qt-paragraph-type:empty; margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;\"><br /></p></body></html>",
+            "expression": "case when  \"left\" = \"right\" then to_dms(\"left\",'x',2,'aligned') else to_dms(\"top\",'y',2,'aligned') end",
+            "group": "user",
+            "name": "经纬网格显示",
+            "type": "expression"
+        }
+    ],
+    "qgis_version": "3.22.5-Białowieża"
+}
