@@ -5,6 +5,7 @@ import shutil
 import time
 import requests
 import subprocess
+import argparse
 from PyQt5.QtCore import QMetaType
 from shapely.validation import make_valid
 from datetime import datetime
@@ -1517,11 +1518,13 @@ class DemMakeQGISHeadless:
                 item.setCrs(extent_map_layer.crs())
                 item.setExtent(map_extent)
 
+        '''
         print(f"tif_layer crs: {tdt_layer.crs()}")
         print(f"gpk_layer crs: {contour_layer.crs()}")
         print(f"shp_layer crs: {extent_map_layer.crs()}")
         print(f"map_extent: {map_extent.toString(4)}")
-
+        '''
+        
         if map_items_found == 0:
             print("[警告] 布局模板中未找到地图项（qgsLayoutItemMap）")
 
@@ -1579,13 +1582,20 @@ class DemMakeQGISHeadless:
 
         return True
 
-if __name__ == "__main__":
-    center_lon = 113.370327
-    center_lat = 23.201580
-    side_length = 10
-    project_dir = r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto01"
+def point_to_map(center_lon, center_lat, side_length, project_dir):
+    """
+    执行完整的地图制作工作流
     
-    print(f"=== 测试 DemMakeQGISHeadless ===")
+    Args:
+        center_lon (float): 中心点经度
+        center_lat (float): 中心点纬度
+        side_length (float): 边长（公里）
+        project_dir (str): 项目目录路径
+        
+    Returns:
+        bool: 是否成功完成
+    """
+    print(f"=== 开始地图制作工作流 ===")
     print(f"中心点坐标: ({center_lon}, {center_lat})")
     print(f"边长: {side_length} km")
     print(f"项目目录: {project_dir}")
@@ -1624,7 +1634,7 @@ if __name__ == "__main__":
             else:
                 print("验证失败: 地图范围-天地图.tif 未创建!")
         else:
-            print(f"验证失败: {self.GPKG_EXTENT_4326} 不存在!")
+            print(f"验证失败: {maker.GPKG_EXTENT_4326} 不存在!")
         
         print("\n=== 开始OSM数据下载验证 ===")
         osm_path = None
@@ -1700,8 +1710,8 @@ if __name__ == "__main__":
                 print("验证失败: 相交运算失败!")
         else:
             missing_files = [f for f in osm_gpkg_files.values() if not os.path.exists(f)]
-            if not os.path.exists(extent_gpkg):
-                missing_files.append(extent_gpkg)
+            if not os.path.exists(maker.GPKG_EXTENT_4326):
+                missing_files.append(maker.GPKG_EXTENT_4326)
             print(f"跳过: 缺少必要文件: {[os.path.basename(f) for f in missing_files]}")
         
         print("\n=== 开始DEM影像裁剪验证 ===")
@@ -1790,11 +1800,8 @@ if __name__ == "__main__":
 
         # OSM地图+等高线+山体阴影+DEM高程渲染层
         osm_points_layer = maker.load_vector_layer(maker.EXTENT_OSM_POINTS, maker.EXTENT_OSM_POINTS_LAYER_NAME,"POI图层样式.qml")
-        #osm_points_layer = maker.load_vector_layer(maker.EXTENT_OSM_POINTS, maker.EXTENT_OSM_POINTS_LAYER_NAME)
         osm_lines_layer = maker.load_vector_layer(maker.EXTENT_OSM_LINES, maker.EXTENT_OSM_LINES_LAYER_NAME,"线图层样式.qml")
-        #osm_lines_layer = maker.load_vector_layer(maker.EXTENT_OSM_LINES, maker.EXTENT_OSM_LINES_LAYER_NAME)
         osm_multipolygons_layer = maker.load_vector_layer(maker.EXTENT_OSM_MULTIPOLYGONS, maker.EXTENT_OSM_MULTIPOLYGONS_LAYER_NAME,"面图层样式.qml")
-        #osm_multipolygons_layer = maker.load_vector_layer(maker.EXTENT_OSM_MULTIPOLYGONS, maker.EXTENT_OSM_MULTIPOLYGONS_LAYER_NAME)
 
         dem_layer = maker.load_raster_layer(maker.EXTENT_DEM, maker.EXTENT_DEM_LAYER_NAME,"高程渲染层样式.qml")
         dem_hillshade_layer = maker.load_raster_layer(maker.EXTENT_DEM_HILLSHADOW, maker.EXTENT_DEM_HILLSHADOW_LAYER_NAME,"山体阴影样式.qml")
@@ -1803,8 +1810,70 @@ if __name__ == "__main__":
              dem_hillshade_layer,dem_layer])
 
         print("\n=== 所有测试完成 ===")
+        return True
         
     except Exception as e:
-        print(f"测试失败: {e}")
+        print(f"工作流执行失败: {e}")
         import traceback
         traceback.print_exc()
+        return False
+
+def main_point_to_map():
+    """命令行入口函数"""
+    parser = argparse.ArgumentParser(
+        description='QGIS无头地图制作工具 - 完整工作流',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  # 使用默认参数
+  python make_qgis_headless.py
+  
+  # 指定参数
+  python make_qgis_headless.py --lon 113.370327 --lat 23.201580 --side 10 --project "C:/path/to/project"
+        """
+    )
+    
+    parser.add_argument(
+        '--lon', '--longitude',
+        type=float,
+        default=113.370327,
+        help='中心点经度 (默认: 113.370327)'
+    )
+    
+    parser.add_argument(
+        '--lat', '--latitude',
+        type=float,
+        default=23.201580,
+        help='中心点纬度 (默认: 23.201580)'
+    )
+    
+    parser.add_argument(
+        '--side', '--side-length',
+        type=float,
+        default=10,
+        help='边长，单位公里 (默认: 10)'
+    )
+    
+    parser.add_argument(
+        '--project', '--project-dir',
+        type=str,
+        default=r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto01",
+        help='项目目录路径 (默认: C:\\Users\\Administrator\\Desktop\\QGIS\\地图制作\\DemoMakeQGISMapAuto01)'
+    )
+    
+    args = parser.parse_args()
+    
+    # 执行工作流
+    success = point_to_map(
+        center_lon=args.lon,
+        center_lat=args.lat,
+        side_length=args.side,
+        project_dir=args.project
+    )
+    
+    # 返回退出码
+    sys.exit(0 if success else 1)
+
+if __name__ == "__main__":
+    main_point_to_map()
+
