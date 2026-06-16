@@ -10,7 +10,10 @@ import gpxpy
 import gpxpy.gpx
 from PyQt5.QtCore import QMetaType
 from shapely.validation import make_valid
+from shapely.geometry import Point
 from datetime import datetime
+import geopandas as gpd
+
 
 TIANDITU_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
@@ -55,6 +58,7 @@ class DemMakeQGISHeadless:
         self.CONTOUR_FILE = os.path.join(self.project_path, "extent_contour.gpkg")
         self.CONTOUR_LAYER_NAME = "extent_contour"
 
+        # 图层和样式
         self.MAP_OSM = os.path.join(self.project_path, 'map.osm')
         self.EXTENT_OSM_LINES = os.path.join(self.project_path, "extent_osm_lines.gpkg")
         self.EXTENT_OSM_LINES_LAYER_NAME = "extent_osm_lines"
@@ -64,6 +68,8 @@ class DemMakeQGISHeadless:
         self.EXTENT_OSM_MULTIPOLYGONS_LAYER_NAME = "extent_osm_multipolygons"
         self.EXTENT_OSM_MULTIPOLYGONS = os.path.join(self.project_path, "extent_osm_multipolygons.gpkg")
         self.EXTENT_OSM_MULTIPOLYGONS_LAYER_NAME = "extent_osm_multipolygons"
+        self.EXTENT_ROUTE_LAYER = os.path.join(self.project_path, "extent_route_layer.gpkg")
+        self.EXTENT_ROUTE_LAYER_LAYER_NAME = "extent_route_layer"
 
         self.EXTENT_DEM = os.path.join(self.project_path, "extent_dem.tif")
         self.EXTENT_DEM_LAYER_NAME = "extent_dem"
@@ -1584,7 +1590,161 @@ class DemMakeQGISHeadless:
 
         return True
 
-def point_to_map(center_lon, center_lat, side_length, project_dir):
+    def add_route_layer(self, gpx_file_path):
+        """
+        根据GPX文件添加轨迹图层到项目
+        
+        参数:
+        gpx_file_path (str): GPX文件路径
+        
+        返回:
+        bool: 是否成功添加
+        """
+        print(f"\n=== 开始添加轨迹图层 ===")
+        print(f"GPX文件路径: {gpx_file_path}")
+        
+        try:
+            # 1. 判断地图范围文件是否存在
+            if not os.path.exists(self.GPKG_EXTENT_4326):
+                print(f"错误: 地图范围文件不存在: {self.GPKG_EXTENT_4326}")
+                return False
+            
+            print(f"地图范围文件存在: {self.GPKG_EXTENT_4326}")
+            
+            # 2. 判断GPX文件是否存在
+            if not os.path.exists(gpx_file_path):
+                print(f"错误: GPX文件不存在: {gpx_file_path}")
+                return False
+            
+            # 3. 读取GPX文件，获取所有轨迹点
+            with open(gpx_file_path, 'r', encoding='utf-8') as f:
+                gpx = gpxpy.parse(f)
+            
+            all_points = []
+            for track in gpx.tracks:
+                for segment in track.segments:
+                    for point in segment.points:
+                        all_points.append((point.longitude, point.latitude))
+            
+            if not all_points:
+                print("错误: GPX文件中没有找到轨迹点")
+                return False
+            
+            print(f"GPX文件中共有 {len(all_points)} 个轨迹点")
+            
+            # 4. 判断GPX轨迹是否在地图范围内
+            # 读取地图范围文件
+            extent_gdf = gpd.read_file(self.GPKG_EXTENT_4326)
+            if extent_gdf.empty:
+                print("错误: 地图范围文件为空")
+                return False
+            
+            extent_geometry = extent_gdf.geometry.iloc[0]
+            
+            # 检查是否有轨迹点在范围内
+            has_point_in_extent = False
+            for lon, lat in all_points:
+                point = Point(lon, lat)
+                if extent_geometry.contains(point) or extent_geometry.intersects(point):
+                    has_point_in_extent = True
+                    break
+            
+            if not has_point_in_extent:
+                print("错误: GPX轨迹不在地图范围内")
+                return False
+            
+            print("GPX轨迹在地图范围内")
+            
+            # 5. 创建轨迹图层
+            from qgis.core import QgsVectorLayer, QgsField, QgsGeometry, QgsFeature, QgsVectorFileWriter
+            
+            temp_layer = QgsVectorLayer("LineString?crs=epsg:4326", "轨迹", "memory")
+            
+            if not temp_layer.isValid():
+                print("错误: 临时图层创建失败")
+                return False
+            
+            temp_layer.startEditing()
+            
+            temp_layer.dataProvider().addAttributes([
+                QgsField("id", QMetaType.Type.Int),
+                QgsField("name", QMetaType.Type.QString)
+            ])
+            temp_layer.updateFields()
+            
+            # 创建线要素
+            from qgis.core import QgsPointXY
+            
+            if len(all_points) >= 2:
+                qgis_points = [QgsPointXY(lon, lat) for lon, lat in all_points]
+                line_geometry = QgsGeometry.fromPolylineXY(qgis_points)
+                
+                feature = QgsFeature()
+                feature.setGeometry(line_geometry)
+                feature.setAttributes([1, "轨迹"])
+                temp_layer.dataProvider().addFeature(feature)
+            
+            temp_layer.updateExtents()
+            temp_layer.commitChanges()
+            
+            # 6. 保存为GPKG文件
+            output_gpkg = os.path.join(self.project_path, "extent_route_layer.gpkg")
+            
+            options = QgsVectorFileWriter.SaveVectorOptions()
+            options.driverName = "GPKG"
+            options.fileEncoding = "UTF-8"
+            transform_context = self.project.transformContext()
+            
+            QgsVectorFileWriter.writeAsVectorFormatV3(
+                temp_layer,
+                output_gpkg,
+                transform_context,
+                options
+            )
+            
+            print(f"轨迹图层已保存: {output_gpkg}")
+            
+            # 7. 添加到QGIS项目
+            layer_name = "extent_route_layer"
+            
+            # 检查是否已存在
+            for layer in self.project.mapLayers().values():
+                if layer.name() == layer_name:
+                    print(f"图层 {layer_name} 已存在，跳过添加")
+                    return True
+            
+            route_layer = QgsVectorLayer(output_gpkg, layer_name, 'ogr')
+            if not route_layer.isValid():
+                print(f"错误: 加载轨迹图层失败: {output_gpkg}")
+                return False
+            
+            print(f"[OK] 轨迹图层加载成功")
+            
+            # 加载样式
+            style_path = os.path.join(self.TEMPLATE_PATH, "轨迹图层样式.qml")
+            if os.path.exists(style_path):
+                print(f"加载样式: {style_path}")
+                route_layer.loadNamedStyle(style_path)
+                route_layer.triggerRepaint()
+            else:
+                print("样式文件不存在，未加载样式")
+            
+            self.project.addMapLayer(route_layer)
+            
+            # 8. 保存项目
+            self.save_project()
+            print(f"项目已保存")
+            
+            print("\n=== 轨迹图层添加完成 ===")
+            return True
+            
+        except Exception as e:
+            print(f"添加轨迹图层失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+def point_to_map(center_lon, center_lat, side_length, project_dir,gpx_file_path=None):
     """
     执行完整的地图制作工作流
     
@@ -1620,6 +1780,12 @@ def point_to_map(center_lon, center_lat, side_length, project_dir):
         project_path = maker.save_project()
 
         print(f"项目已保存到: {project_path}")
+
+        if gpx_file_path and os.path.exists(gpx_file_path):
+            print(f"添加GPX轨迹图层...")
+            maker.add_route_layer(gpx_file_path)
+        else:
+            print("GPX文件不存在，未添加轨迹图层")
         
         print("\n=== 开始天地图下载验证 ===")
         if maker._check_gpkg_exists():
@@ -1796,20 +1962,27 @@ def point_to_map(center_lon, center_lat, side_length, project_dir):
         
         print("\n=== 开始导出地图验证 ===")
         # 影像地图+等高线
+        if gpx_file_path and os.path.exists(gpx_file_path):
+            route_layer = maker.load_vector_layer(maker.EXTENT_ROUTE_LAYER, maker.EXTENT_ROUTE_LAYER_LAYER_NAME,"轨迹图层样式.qml")
+        else:
+            route_layer = None
+
         tdt_layer = maker.load_raster_layer(maker.TIANDITU_MAP, maker.TIANDITU_MAP_LAYER_NAME)
         contour_layer = maker.load_vector_layer(maker.CONTOUR_FILE, maker.CONTOUR_LAYER_NAME,"等高线图层样式.qml")
-        maker.export_map_by_layout_templet(layers_to_show=[contour_layer,tdt_layer])
+        maker.export_map_by_layout_templet(layers_to_show=[contour_layer,route_layer,tdt_layer])
 
         # OSM地图+等高线+山体阴影+DEM高程渲染层
         osm_points_layer = maker.load_vector_layer(maker.EXTENT_OSM_POINTS, maker.EXTENT_OSM_POINTS_LAYER_NAME,"POI图层样式.qml")
         osm_lines_layer = maker.load_vector_layer(maker.EXTENT_OSM_LINES, maker.EXTENT_OSM_LINES_LAYER_NAME,"线图层样式.qml")
         osm_multipolygons_layer = maker.load_vector_layer(maker.EXTENT_OSM_MULTIPOLYGONS, maker.EXTENT_OSM_MULTIPOLYGONS_LAYER_NAME,"面图层样式.qml")
 
+
         dem_layer = maker.load_raster_layer(maker.EXTENT_DEM, maker.EXTENT_DEM_LAYER_NAME,"高程渲染层样式.qml")
         dem_hillshade_layer = maker.load_raster_layer(maker.EXTENT_DEM_HILLSHADOW, maker.EXTENT_DEM_HILLSHADOW_LAYER_NAME,"山体阴影样式.qml")
         maker.export_map_by_layout_templet(layers_to_show=[contour_layer,
-             osm_points_layer,osm_lines_layer,osm_multipolygons_layer,
-             dem_hillshade_layer,dem_layer])
+            route_layer,
+            osm_points_layer,osm_lines_layer,osm_multipolygons_layer,
+            dem_hillshade_layer,dem_layer])
 
         print("\n=== 所有测试完成 ===")
         return True
@@ -1900,7 +2073,7 @@ def gpx_to_map(gpx_file_path, project_dir):
         
         # 8. 调用point_to_map生成地图
         print("\n=== 开始生成地图项目 ===")
-        success = point_to_map(center_lon, center_lat, side_length_km, project_dir)
+        success = point_to_map(center_lon, center_lat, side_length_km, project_dir, gpx_file_path)
         
         if success:
             print(f"\n=== GPX轨迹地图生成完成 ===")
