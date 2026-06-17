@@ -1473,6 +1473,11 @@ class DemMakeQGISHeadless:
 
         # 只需要在打印图项目中添加地图范围。
         project_print.addMapLayer(extent_map_layer,False)
+        QgsExpressionContextUtils.setProjectVariable(project_print, "bg_satellite", '0')
+        QgsExpressionContextUtils.setProjectVariable(project_print, "Blank_pct", '0.15')
+        QgsExpressionContextUtils.setProjectVariable(project_print, "Border", '10')
+        QgsExpressionContextUtils.setProjectVariable(project_print, "Longest_side", '1000')
+        QgsExpressionContextUtils.setProjectVariable(project_print, "project_scale_parm", '1')
 
         if not os.path.exists(self.QPT_PATH):
             print(f"[错误] 找不到布局模板：{self.QPT_PATH}")
@@ -1511,6 +1516,7 @@ class DemMakeQGISHeadless:
         QgsExpressionContextUtils.setLayoutVariable(layout, "Longest_side", self.LONGEST_SIDE)
         QgsExpressionContextUtils.setLayoutVariable(layout, "Blank_pct", self.BLANK_PCT)
         QgsExpressionContextUtils.setLayoutVariable(layout, "Border", self.BORDER)
+
         print(f"[OK] 布局变量已设置：Longest_side={self.LONGEST_SIDE}, Blank_pct={self.BLANK_PCT}, Border={self.BORDER}")
 
         # 设置打印范围
