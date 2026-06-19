@@ -59,15 +59,22 @@ class DemMakeQGISHeadless:
         self.CONTOUR_LAYER_NAME = "extent_contour"
 
         # 图层和样式
+        self.OSM_POINTS = os.path.join(self.project_path, "osm_points.gpkg")
+        self.OSM_LINES = os.path.join(self.project_path, "osm_lines.gpkg")
+        self.OSM_MULTIPOLYGONS = os.path.join(self.project_path, "osm_multipolygons.gpkg")
+
         self.MAP_OSM = os.path.join(self.project_path, 'map.osm')
         self.EXTENT_OSM_LINES = os.path.join(self.project_path, "extent_osm_lines.gpkg")
         self.EXTENT_OSM_LINES_LAYER_NAME = "extent_osm_lines"
+
         self.EXTENT_OSM_POINTS = os.path.join(self.project_path, "extent_osm_points.gpkg")
         self.EXTENT_OSM_POINTS_LAYER_NAME = "extent_osm_points"
+
         self.EXTENT_OSM_MULTIPOLYGONS = os.path.join(self.project_path, "extent_osm_multipolygons.gpkg")
         self.EXTENT_OSM_MULTIPOLYGONS_LAYER_NAME = "extent_osm_multipolygons"
         self.EXTENT_OSM_MULTIPOLYGONS = os.path.join(self.project_path, "extent_osm_multipolygons.gpkg")
         self.EXTENT_OSM_MULTIPOLYGONS_LAYER_NAME = "extent_osm_multipolygons"
+
         self.EXTENT_ROUTE_LAYER = os.path.join(self.project_path, "extent_route_layer.gpkg")
         self.EXTENT_ROUTE_LAYER_LAYER_NAME = "extent_route_layer"
 
@@ -755,9 +762,9 @@ class DemMakeQGISHeadless:
         
         if osm_layers is None:
             osm_layers = {
-                'points': os.path.join(self.project_path, 'osm_points.gpkg'),
-                'lines': os.path.join(self.project_path, 'osm_lines.gpkg'),
-                'multipolygons': os.path.join(self.project_path, 'osm_multipolygons.gpkg')
+                'points': self.OSM_POINTS,
+                'lines': self.OSM_LINES,
+                'multipolygons': self.OSM_MULTIPOLYGONS
             }
         
         result_files = {}
@@ -1419,7 +1426,7 @@ class DemMakeQGISHeadless:
         
 
     # 20260524，改成通用打印模式
-    def export_map_by_layout_templet(self,layers_to_show=[]):
+    def export_map_by_layout_templet(self,layers_to_show=[],map_title="测试用图",map_maker="测试用户"):
         """
         打印地图
         
@@ -1516,6 +1523,8 @@ class DemMakeQGISHeadless:
         QgsExpressionContextUtils.setLayoutVariable(layout, "Longest_side", self.LONGEST_SIDE)
         QgsExpressionContextUtils.setLayoutVariable(layout, "Blank_pct", self.BLANK_PCT)
         QgsExpressionContextUtils.setLayoutVariable(layout, "Border", self.BORDER)
+        QgsExpressionContextUtils.setLayoutVariable(layout, "map_title", map_title)
+        QgsExpressionContextUtils.setLayoutVariable(layout, "map_maker", map_maker)
 
         print(f"[OK] 布局变量已设置：Longest_side={self.LONGEST_SIDE}, Blank_pct={self.BLANK_PCT}, Border={self.BORDER}")
 
@@ -1557,6 +1566,8 @@ class DemMakeQGISHeadless:
         page_sz = page.pageSize()
         print(f"[OK] page.pageSize() = {page_sz.width():.2f} x {page_sz.height():.2f} mm")
 
+        ''' 所有要输出的元素包围盒
+        
         all_items = layout.items()
         if all_items:
             union_rect = all_items[0].sceneBoundingRect()
@@ -1570,7 +1581,14 @@ class DemMakeQGISHeadless:
         render_w = max(page_sz.width(), union_rect.right())
         render_h = max(page_sz.height(), union_rect.bottom())
         render_rect = QRectF(0, 0, render_w, render_h)
-        print(f"[OK] 最终渲染区域：{render_w:.2f} x {render_h:.2f} mm")
+        print(f"[OK] 采用所有元素包围盒，最终渲染区域：{render_w:.2f} x {render_h:.2f} mm")
+        '''
+
+        # 采用打印页面尺寸
+        render_w = page_sz.width()
+        render_h = page_sz.height()
+        render_rect = QRectF(0, 0, render_w, render_h)
+        print(f"[OK] 采用打印页面尺寸，最终渲染区域：{render_w:.2f} x {render_h:.2f} mm")
 
         px_w = int(render_w / 25.4 * self.DPI)
         px_h = int(render_h / 25.4 * self.DPI)
@@ -1856,9 +1874,9 @@ def point_to_map(center_lon, center_lat, side_length, project_dir,gpx_file_path=
 
         print("\n=== 开始OSM图层相交运算验证 ===")
         osm_gpkg_files = {
-            'points': os.path.join(project_dir, 'osm_points.gpkg'),
-            'lines': os.path.join(project_dir, 'osm_lines.gpkg'),
-            'multipolygons': os.path.join(project_dir, 'osm_multipolygons.gpkg')
+            'points': maker.OSM_POINTS,
+            'lines': maker.OSM_LINES,
+            'multipolygons': maker.OSM_MULTIPOLYGONS
         }
 
         if all(os.path.exists(f) for f in osm_gpkg_files.values()) and os.path.exists(maker.GPKG_EXTENT_4326):
@@ -2153,5 +2171,8 @@ def main_point_to_map():
 
 if __name__ == "__main__":
     # main_point_to_map()
-    gpx_to_map(r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto01\2024-03-03 07 57 火北帽.gpx", r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto01")
+    point_to_map(center_lon=113.370327, center_lat=23.201580, side_length=10, 
+        project_dir=r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto01", 
+        gpx_file_path=r"C:\Users\Administrator\Desktop\QGIS\地图制作\火帽北山\2024-03-03 07 57 火北帽.gpx")
+    # gpx_to_map(r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto01\2024-03-03 07 57 火北帽.gpx", r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto01")
 
