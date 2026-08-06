@@ -28,16 +28,19 @@ TIANDITU_WMTS_URL = f'http://t0.tianditu.gov.cn/img_w/wmts?tk={TIANDITU_TK}'
 
 
 class DemMakeQGISHeadless:
-    def __init__(self, center_longitude, center_latitude, side_length_km, project_path):
-        if side_length_km > 30:
-            raise ValueError("边长不能大于30km")
+    def __init__(self, center_longitude, center_latitude, north_south_length_km, east_west_length_km, project_path):
+        if north_south_length_km > 30:
+            raise ValueError("南北边长不能大于30km")
+        if east_west_length_km > 30:
+            raise ValueError("东西边长不能大于30km")
         
         self.project = None
         self.qgs_app = None
 
         self.center_longitude = center_longitude
         self.center_latitude = center_latitude
-        self.side_length_km = side_length_km
+        self.north_south_length_km = north_south_length_km
+        self.east_west_length_km = east_west_length_km
         self.project_path = project_path
 
         self.OUTPUT = os.path.join(self.project_path, "output")
@@ -48,7 +51,7 @@ class DemMakeQGISHeadless:
         self.MAP_EXTENT_LAYER_NAME = "地图范围"
 
         self.PRINT_MODEL_PATH = os.path.join(self.RESOURCES_PATH, "printModel")
-        self.QPT_PATH = os.path.join(self.PRINT_MODEL_PATH, "layoutmodel2.qpt")
+        self.QPT_PATH = os.path.join(self.PRINT_MODEL_PATH, "layoutmodel-横向.qpt")
         
         # 天地图地图 map_extent.tif，map_extent_temp.tif，extent_tdt_map
         self.TIANDITU_MAP = os.path.join(self.project_path, 'extent_satellite_map.tif')
@@ -126,7 +129,7 @@ class DemMakeQGISHeadless:
 
 
         self.DPI = 300
-        self.LONGEST_SIDE = 1000.0
+        self.LONGEST_SIDE = 420.0
         self.BLANK_PCT = 0.15
         self.BORDER = 10.0
 
@@ -179,7 +182,7 @@ class DemMakeQGISHeadless:
         QgsExpressionContextUtils.setProjectVariable(self.project, "bg_satellite", '0')
         QgsExpressionContextUtils.setProjectVariable(self.project, "Blank_pct", '0.15')
         QgsExpressionContextUtils.setProjectVariable(self.project, "Border", '10')
-        QgsExpressionContextUtils.setProjectVariable(self.project, "Longest_side", '1000')
+        QgsExpressionContextUtils.setProjectVariable(self.project, "Longest_side", self.LONGEST_SIDE)
         QgsExpressionContextUtils.setProjectVariable(self.project, "project_scale_parm", '1')
         
     # 定义私有方法，将./resources目录下的所有文件拷贝到项目目录下
@@ -208,29 +211,30 @@ class DemMakeQGISHeadless:
         da = QgsDistanceArea()
         da.setEllipsoid("WGS84")
         
-        half_side = self.side_length_km * 500
+        half_ns = self.north_south_length_km * 500
+        half_ew = self.east_west_length_km * 500
         
         north_point = da.computeSpheroidProject(
             QgsPointXY(self.center_longitude, self.center_latitude),
-            distance=half_side,
+            distance=half_ns,
             azimuth=math.radians(0)
         )
         
         south_point = da.computeSpheroidProject(
             QgsPointXY(self.center_longitude, self.center_latitude),
-            distance=half_side,
+            distance=half_ns,
             azimuth=math.radians(180)
         )
         
         east_point = da.computeSpheroidProject(
             QgsPointXY(self.center_longitude, self.center_latitude),
-            distance=half_side,
+            distance=half_ew,
             azimuth=math.radians(90)
         )
         
         west_point = da.computeSpheroidProject(
             QgsPointXY(self.center_longitude, self.center_latitude),
-            distance=half_side,
+            distance=half_ew,
             azimuth=math.radians(270)
         )
         
@@ -324,20 +328,7 @@ class DemMakeQGISHeadless:
         self.project.addMapLayer(layer)
         return layer
 
-    # 添加地图范围图层
-    # 拟作废
-    def add_map_extent_layer(self):
-        """
-        加载"地图范围"图层，并运用"地图范围样式.qml"样式文件，然后添加到qgis项目中
 
-        返回:
-        bool: 成功返回True，失败返回False
-        """
-        layer_path = self.make_map_extent_layer()
-        if layer_path is None:
-            return False
-
-        return self.add_layer_to_project(layer_path, "地图范围", "地图范围样式.qml")
     # 保存项目
     def save_project(self, project_name="map_project.qgz"):
         if self.project is None:
@@ -630,31 +621,6 @@ class DemMakeQGISHeadless:
         print("\n=== 天地图下载完成 ===")
         return tif_path
 
-    # 下载并添加天地图瓦片
-    # 拟作废
-    def download_and_add_tianditu(self, zoom_level=14):
-        """
-        下载天地图瓦片生成影像，并添加到QGIS项目
-
-        参数:
-        zoom_level (int): 瓦片缩放级别
-
-        返回:
-        str: 成功返回天地图影像文件路径，失败返回None
-        """
-        tif_path = self.make_tianditu_layer(zoom_level=zoom_level)
-        if tif_path is None:
-            return None
-
-        added = self.add_layer_to_project(
-            tif_path,
-            self.TIANDITU_MAP_LAYER_NAME,
-            ""
-        )
-        if not added:
-            return None
-
-        return tif_path
 
     # 下载OSM数据
     def download_osm_data(self, output_file=None, timeout=300):
@@ -798,47 +764,6 @@ class DemMakeQGISHeadless:
         print("=== OSM数据提取完成 ===")
         return output_files
 
-    # 添加OSM GPKG图层到项目
-    # 拟作废
-    def add_osm_gpkg_layers_to_project(self, gpkg_files=None):
-        """
-        将提取的OSM GPKG图层添加到QGIS项目
-        
-        参数:
-        gpkg_files (list): GPKG文件路径列表，默认为自动查找项目目录下的osm_*.gpkg文件
-        
-        返回:
-        list: 成功添加的图层对象列表
-        """
-        if gpkg_files is None:
-            # 自动查找项目目录下的osm_*.gpkg文件
-            gpkg_files = []
-            for f in os.listdir(self.project_path):
-                if f.startswith('osm_') and f.endswith('.gpkg'):
-                    gpkg_files.append(os.path.join(self.project_path, f))
-        
-        if not gpkg_files:
-            print("警告: 未找到OSM GPKG文件")
-            return []
-        
-        added_layers = []
-        
-        print(f"\n=== 开始添加OSM图层到项目 ===")
-        
-        for gpkg_file in gpkg_files:
-            layer_name = os.path.basename(gpkg_file).replace('.gpkg', '').replace('osm_', '')
-            
-            added = self.add_layer_to_project(gpkg_file, layer_name)
-            if not added:
-                continue
-            
-            for layer in self.project.mapLayers().values():
-                if layer.name() == layer_name:
-                    added_layers.append(layer)
-                    break
-        
-        print("=== OSM图层添加完成 ===")
-        return added_layers
 
     # 修复几何图形错误
     def clean_geometries(self, gdf):
@@ -1317,34 +1242,6 @@ class DemMakeQGISHeadless:
             print(f"等高线提取失败: {e.stderr}")
             return None
 
-    # 添加等高线图层到项目并加载样式
-    # 拟作废
-    def add_contour_layer(self, contour_file=None):
-        """
-        将等高线图层添加到QGIS项目并加载样式
-        
-        参数:
-        contour_file (str): 等高线GPKG文件路径，默认为 CONTOUR_FILE
-        
-        返回:
-        QgsVectorLayer: 添加的图层对象，如果失败返回None
-        """
-        print("\n=== 开始添加等高线图层 ===")
-        
-        if contour_file is None:
-            contour_file = self.CONTOUR_FILE
-        
-        layer_name = self.CONTOUR_LAYER_NAME
-        added = self.add_layer_to_project(contour_file, layer_name, "等高线图层样式.qml")
-        if not added:
-            return None
-        
-        for layer in self.project.mapLayers().values():
-            if layer.name() == layer_name:
-                print(f"已添加图层: {layer_name}")
-                return layer
-
-        return None
     # 生成DEM高程渲染层
     def make_dem_render_layer(self, dem_file=None, render_file=None):
         """
@@ -1376,35 +1273,7 @@ class DemMakeQGISHeadless:
 
         return render_file
 
-    # 添加DEM高程渲染层到项目并加载样式
-    # 拟作废
-    def add_dem_render_layer(self, dem_file=None):
-        """
-        将DEM高程渲染层添加到QGIS项目并加载样式
 
-        参数:
-        dem_file (str): 输入DEM文件路径，默认为 EXTENT_DEM
-
-        返回:
-        QgsRasterLayer: 添加的图层对象，如果失败返回None
-        """
-        print("\n=== 开始添加DEM高程渲染层 ===")
-
-        render_file = self.make_dem_render_layer(dem_file)
-        if not render_file:
-            return None
-        
-        layer_name = self.EXTENT_DEM_RENDER_LAYER_NAME
-        added = self.add_layer_to_project(render_file, layer_name, "高程渲染层样式.qml")
-        if not added:
-            return None
-        
-        for layer in self.project.mapLayers().values():
-            if layer.name() == layer_name:
-                print(f"已添加图层: {layer_name}")
-                return layer
-        
-        return None
     # 生成山体阴影
     def generate_hillshade(self, dem_file=None, hillshade_file=None, azimuth=315, altitude=45, z_factor=1):
         """
@@ -1477,34 +1346,6 @@ class DemMakeQGISHeadless:
             print(f"山体阴影生成失败: {e.stderr}")
             return None
 
-    # 添加山体阴影图层到项目并加载样式
-    # 拟作废
-    def add_hillshade_layer(self, hillshade_file=None):
-        """
-        将山体阴影图层添加到QGIS项目
-        
-        参数:
-        hillshade_file (str): 山体阴影文件路径，默认为extent_dem_hillshadow.tif
-        
-        返回:
-        QgsRasterLayer: 添加的图层对象，如果失败返回None
-        """
-        print("\n=== 开始添加山体阴影图层 ===")
-        
-        if hillshade_file is None:
-            hillshade_file = os.path.join(self.project_path, "extent_dem_hillshadow.tif")
-        
-        layer_name = self.EXTENT_DEM_HILLSHADOW_LAYER_NAME
-        added = self.add_layer_to_project(hillshade_file, layer_name, "山体阴影样式.qml")
-        if not added:
-            return None
-
-        for layer in self.project.mapLayers().values():
-            if layer.name() == layer_name:
-                print(f"已添加图层: {layer_name}")
-                return layer
-        
-        return None
 
     def _reproject_to_3857(self, layer):
         
@@ -1638,7 +1479,7 @@ class DemMakeQGISHeadless:
         
 
     # 20260524，改成通用打印模式
-    def export_map_by_layout_templet(self,layers_to_show=[],map_title="测试用图",map_maker="测试用户"):
+    def export_map_by_layout_templet(self,layers_to_show=[],map_title="广州蓝天救援协会龙腾牛奔训练地图",map_maker="1121-奀奀的排骨"):
         """
         打印地图
         
@@ -1695,7 +1536,7 @@ class DemMakeQGISHeadless:
         QgsExpressionContextUtils.setProjectVariable(project_print, "bg_satellite", '0')
         QgsExpressionContextUtils.setProjectVariable(project_print, "Blank_pct", '0.15')
         QgsExpressionContextUtils.setProjectVariable(project_print, "Border", '10')
-        QgsExpressionContextUtils.setProjectVariable(project_print, "Longest_side", '1000')
+        QgsExpressionContextUtils.setProjectVariable(project_print, "Longest_side", self.LONGEST_SIDE)
         QgsExpressionContextUtils.setProjectVariable(project_print, "project_scale_parm", '1')
 
         if not os.path.exists(self.QPT_PATH):
@@ -1948,57 +1789,16 @@ class DemMakeQGISHeadless:
             traceback.print_exc()
             return None
 
-    # 添加轨迹图层
-    # 拟作废
-    def add_route_layer(self, gpx_file_path):
-        """
-        根据GPX文件添加轨迹图层到项目
 
-        参数:
-        gpx_file_path (str): GPX文件路径
-
-        返回:
-        bool: 是否成功添加
-        """
-        print(f"\n=== 开始添加轨迹图层 ===")
-
-        try:
-            layer_path = self.make_route_layer(gpx_file_path)
-            if layer_path is None:
-                return False
-
-            added = self.add_layer_to_project(
-                layer_path,
-                self.EXTENT_ROUTE_LAYER_NAME,
-                "轨迹图层样式.qml"
-            )
-            if not added:
-                return False
-
-            self.save_project()
-            print(f"项目已保存")
-
-            print("\n=== 轨迹图层添加完成 ===")
-            return True
-
-        except Exception as e:
-            print(f"添加轨迹图层失败: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
-
-
-
-
-
-def point_to_map(center_lon, center_lat, side_length, project_dir,gpx_file_path=None):
+def point_to_map(center_lon, center_lat, north_south_length, east_west_length, project_dir,gpx_file_path=None):
     """
     执行完整的地图制作工作流
     
     Args:
         center_lon (float): 中心点经度
         center_lat (float): 中心点纬度
-        side_length (float): 边长（公里）
+        north_south_length (float): 南北边长（公里）
+        east_west_length (float): 东西边长（公里）
         project_dir (str): 项目目录路径
         
     Returns:
@@ -2006,7 +1806,8 @@ def point_to_map(center_lon, center_lat, side_length, project_dir,gpx_file_path=
     """
     print(f"=== 开始地图制作工作流 ===")
     print(f"中心点坐标: ({center_lon}, {center_lat})")
-    print(f"边长: {side_length} km")
+    print(f"南北边长: {north_south_length} km")
+    print(f"东西边长: {east_west_length} km")
     print(f"项目目录: {project_dir}")
     
     try:
@@ -2014,7 +1815,8 @@ def point_to_map(center_lon, center_lat, side_length, project_dir,gpx_file_path=
         maker = DemMakeQGISHeadless(
             center_longitude=center_lon,
             center_latitude=center_lat,
-            side_length_km=side_length,
+            north_south_length_km=north_south_length,
+            east_west_length_km=east_west_length,
             project_path=project_dir
         )
 
@@ -2027,7 +1829,7 @@ def point_to_map(center_lon, center_lat, side_length, project_dir,gpx_file_path=
         map_extent_file = maker.make_map_extent_layer()
 
         # 生成天地图图层
-        extent_tianditu_file = maker.make_tianditu_layer(zoom_level=14)
+        extent_tianditu_file = maker.make_tianditu_layer(zoom_level=18)
 
         # 生成dem图层
         extent_dem_file = maker.extract_dem_by_extent(dem_files_dir=None, extent_gpkg=maker.MAP_EXTENT_4326)
@@ -2048,7 +1850,9 @@ def point_to_map(center_lon, center_lat, side_length, project_dir,gpx_file_path=
         extent_dem_hillshade_extreme_file = maker.generate_hillshade(dem_file=extent_dem_resampled_file, hillshade_file=maker.EXTENT_DEM_HILLSHADOW_EXAG, z_factor=5)
 
         # 生成轨迹图层
-        extent_route_file = maker.make_route_layer(gpx_file_path)
+        if gpx_file_path:
+            print(f"生成轨迹图层: {gpx_file_path}")
+            extent_route_file = maker.make_route_layer(gpx_file_path)
 
         # 下载OSM数据图层
         osm_file = maker.download_osm_data()
@@ -2119,12 +1923,13 @@ def point_to_map(center_lon, center_lat, side_length, project_dir,gpx_file_path=
             layer_style=maker.DEFAULT_TEMPLATE[maker.EXTENT_DEM_HILLSHADOW_LAYER_NAME]
         )
 
-        # 添加轨迹
-        maker.add_layer_to_project(
-            layer_path=extent_route_file,
-            layer_name=maker.EXTENT_ROUTE_LAYER_NAME,
-            layer_style=maker.DEFAULT_TEMPLATE[maker.EXTENT_ROUTE_LAYER_NAME]
-        )
+        # 添加轨迹图层
+        if "extent_route_file" in locals():
+            maker.add_layer_to_project(
+                layer_path=extent_route_file,
+                layer_name=maker.EXTENT_ROUTE_LAYER_NAME,
+                layer_style=maker.DEFAULT_TEMPLATE[maker.EXTENT_ROUTE_LAYER_NAME]
+            )
 
 
         # 保存项目
@@ -2167,256 +1972,7 @@ def point_to_map(center_lon, center_lat, side_length, project_dir,gpx_file_path=
         import traceback
         traceback.print_exc()
         return False
-''' 
-def point_to_map(center_lon, center_lat, side_length, project_dir,gpx_file_path=None):
-    """
-    执行完整的地图制作工作流
-    
-    Args:
-        center_lon (float): 中心点经度
-        center_lat (float): 中心点纬度
-        side_length (float): 边长（公里）
-        project_dir (str): 项目目录路径
-        
-    Returns:
-        bool: 是否成功完成
-    """
-    print(f"=== 开始地图制作工作流 ===")
-    print(f"中心点坐标: ({center_lon}, {center_lat})")
-    print(f"边长: {side_length} km")
-    print(f"项目目录: {project_dir}")
-    
-    try:
-        maker = DemMakeQGISHeadless(
-            center_longitude=center_lon,
-            center_latitude=center_lat,
-            side_length_km=side_length,
-            project_path=project_dir
-        )
-        
-        print("\n创建QGIS项目...")
-        maker.create_project()
 
-        print("添加地图范围图层...")
-        maker.add_map_extent_layer()
-
-        print("保存项目...")
-        project_path = maker.save_project()
-
-        print(f"项目已保存到: {project_path}")
-
-        if gpx_file_path and os.path.exists(gpx_file_path):
-            print(f"添加GPX轨迹图层...")
-            maker.add_route_layer(gpx_file_path)
-        else:
-            print("GPX文件不存在，未添加轨迹图层")
-        
-        print("\n=== 开始天地图下载验证 ===")
-        if maker._check_gpkg_exists(maker.MAP_EXTENT_4326):
-            print(f"地图范围:{maker.MAP_EXTENT_4326}存在，开始下载天地图...")
-            tif_path = maker.download_and_add_tianditu(zoom_level=14)
-            
-            if os.path.exists(tif_path):
-                print(f"验证成功: 地图范围-天地图.tif 已创建!")
-                print(f"文件大小: {os.path.getsize(tif_path)} bytes")
-                
-                print("\n重新保存项目...")
-                final_project_path = maker.save_project()
-                print(f"最终项目已保存到: {final_project_path}")
-            else:
-                print("验证失败: 地图范围-天地图.tif 未创建!")
-        else:
-            print(f"验证失败: {maker.MAP_EXTENT_4326} 不存在!")
-        
-        print("\n=== 开始OSM数据下载验证 ===")
-        osm_path = None
-        if maker._check_gpkg_exists(maker.MAP_EXTENT_4326):
-            print(f"地图范围:{maker.MAP_EXTENT_4326}存在，开始下载OSM数据...")
-            osm_path = maker.download_osm_data()
-            
-            if osm_path and os.path.exists(osm_path):
-                print(f"验证成功: {osm_path} 已创建!")
-                print(f"文件大小: {os.path.getsize(osm_path)} bytes")
-            else:
-                print("验证失败: OSM数据下载失败!")
-        else:
-            print(f"验证失败: {maker.MAP_EXTENT_4326} 不存在!")
-        
-        print("\n=== 开始OSM数据提取验证 ===")
-        gpkg_files = []
-        if osm_path and os.path.exists(osm_path):
-            print("OSM文件存在，开始提取数据...")
-            gpkg_files = maker.extract_osm_to_gpkg(osm_path)
-            
-            if gpkg_files:
-                print(f"验证成功: 已提取 {len(gpkg_files)} 个图层")
-                for gpkg in gpkg_files:
-                    print(f"  - {os.path.basename(gpkg)}")
-            else:
-                print("验证失败: OSM数据提取失败!")
-        else:
-            print("跳过: OSM文件不存在")
-        
-        print("\n=== 开始添加OSM图层到项目验证 ===")
-        if gpkg_files:
-            print("开始添加OSM图层到项目...")
-            added_layers = maker.add_osm_gpkg_layers_to_project(gpkg_files)
-            
-            if added_layers:
-                print(f"验证成功: 已添加 {len(added_layers)} 个图层")
-                print("\n重新保存项目...")
-                final_project_path = maker.save_project()
-                print(f"最终项目已保存到: {final_project_path}")
-            else:
-                print("验证失败: 添加图层失败!")
-        else:
-            print("跳过: 没有可添加的GPKG文件")
-
-        print("\n=== 开始OSM图层相交运算验证 ===")
-        osm_gpkg_files = {
-            'points': maker.OSM_POINTS,
-            'lines': maker.OSM_LINES,
-            'multipolygons': maker.OSM_MULTIPOLYGONS
-        }
-
-        if all(os.path.exists(f) for f in osm_gpkg_files.values()) and os.path.exists(maker.MAP_EXTENT_4326):
-            print(f"OSM图层文件和地图范围:{maker.MAP_EXTENT_4326}都存在，开始相交运算...")
-            extent_osm_files = maker.intersect_osm_with_extent(extent_gpkg=maker.MAP_EXTENT_4326, osm_layers=osm_gpkg_files)
-
-            if extent_osm_files:
-                print(f"验证成功: 已生成 {len(extent_osm_files)} 个extent_osm文件")
-                for layer_type, file_path in extent_osm_files.items():
-                    print(f"  - {os.path.basename(file_path)},图层类型: {layer_type}")
-
-                print("\n=== 开始添加extent_osm图层并加载样式验证 ===")
-                added_extent_layers = maker.add_extent_osm_layers_with_styles(extent_osm_files)
-
-                if added_extent_layers:
-                    print(f"验证成功: 已添加 {len(added_extent_layers)} 个extent_osm图层")
-                    print("\n重新保存项目...")
-                    final_project_path = maker.save_project()
-                    print(f"最终项目已保存到: {final_project_path}")
-                else:
-                    print("验证失败: 添加extent_osm图层失败!")
-            else:
-                print("验证失败: 相交运算失败!")
-        else:
-            missing_files = [f for f in osm_gpkg_files.values() if not os.path.exists(f)]
-            if not os.path.exists(maker.MAP_EXTENT_4326):
-                missing_files.append(maker.MAP_EXTENT_4326)
-            print(f"跳过: 缺少必要文件: {[os.path.basename(f) for f in missing_files]}")
-        
-        print("\n=== 开始DEM影像裁剪验证 ===")
-        dem_files_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dem_files")
-        
-        if os.path.exists(dem_files_dir) and os.path.exists(maker.MAP_EXTENT_4326):
-            print(f"DEM目录和地图范围:{maker.MAP_EXTENT_4326}都存在，开始裁剪DEM...")
-            extent_dem = maker.extract_dem_by_extent(dem_files_dir=dem_files_dir, extent_gpkg=maker.MAP_EXTENT_4326)
-            
-            if extent_dem and os.path.exists(extent_dem):
-                print(f"验证成功: {os.path.basename(extent_dem)} 已生成")
-                print(f"文件大小: {os.path.getsize(extent_dem)} bytes")
-            else:
-                print("验证失败: DEM裁剪失败!")
-        else:
-            print("跳过: DEM目录或地图范围文件不存在")
-        
-        print("\n=== 开始等高线提取验证 ===")
-        extent_dem_path = os.path.join(project_dir, "extent_dem.tif")
-        
-        if os.path.exists(extent_dem_path):
-            print("extent_dem.tif存在，开始提取等高线...")
-            contour_file = maker.generate_contour_from_dem(dem_file=extent_dem_path)
-            
-            if contour_file and os.path.exists(contour_file):
-                print(f"验证成功: {os.path.basename(contour_file)} 已生成")
-                
-                print("\n=== 开始添加等高线图层验证 ===")
-                contour_layer = maker.add_contour_layer(contour_file=contour_file)
-                
-                if contour_layer:
-                    print("验证成功: 等高线图层已添加")
-                    print("\n重新保存项目...")
-                    final_project_path = maker.save_project()
-                    print(f"项目已保存到: {final_project_path}")
-                else:
-                    print("验证失败: 添加等高线图层失败!")
-            else:
-                print("验证失败: 等高线提取失败!")
-        else:
-            print("跳过: extent_dem.tif不存在")
-        
-        print("\n=== 开始DEM高程渲染层验证 ===")
-        if os.path.exists(extent_dem_path):
-            print("extent_dem.tif存在，开始添加DEM高程渲染层...")
-            dem_layer = maker.add_dem_elevation_layer()
-            
-            if dem_layer:
-                print("验证成功: DEM高程渲染层已添加")
-                print("\n重新保存项目...")
-                final_project_path = maker.save_project()
-                print(f"项目已保存到: {final_project_path}")
-            else:
-                print("验证失败: 添加DEM高程渲染层失败!")
-        else:
-            print("跳过: extent_dem.tif不存在")
-        
-        print("\n=== 开始山体阴影验证 ===")
-        if os.path.exists(extent_dem_path):
-            print("extent_dem.tif存在，开始生成山体阴影...")
-            hillshade_file = maker.generate_hillshade(dem_file=extent_dem_path)
-            
-            if hillshade_file and os.path.exists(hillshade_file):
-                print(f"验证成功: {os.path.basename(hillshade_file)} 已生成")
-                
-                print("\n=== 开始添加山体阴影图层验证 ===")
-                hillshade_layer = maker.add_hillshade_layer(hillshade_file=hillshade_file)
-                
-                if hillshade_layer:
-                    print("验证成功: 山体阴影图层已添加")
-                    print("\n重新保存项目...")
-                    final_project_path = maker.save_project()
-                    print(f"项目已保存到: {final_project_path}")
-                else:
-                    print("验证失败: 添加山体阴影图层失败!")
-            else:
-                print("验证失败: 山体阴影生成失败!")
-        else:
-            print("跳过: extent_dem.tif不存在")
-        
-        print("\n=== 开始导出地图验证 ===")
-        # 影像地图+等高线
-        if gpx_file_path and os.path.exists(gpx_file_path):
-            route_layer = maker.load_vector_layer(maker.EXTENT_ROUTE_LAYER, maker.EXTENT_ROUTE_LAYER_NAME,"轨迹图层样式.qml")
-        else:
-            route_layer = None
-
-        tdt_layer = maker.load_raster_layer(maker.TIANDITU_MAP, maker.TIANDITU_MAP_LAYER_NAME)
-        contour_layer = maker.load_vector_layer(maker.CONTOUR_FILE, maker.CONTOUR_LAYER_NAME,"等高线图层样式.qml")
-        maker.export_map_by_layout_templet(layers_to_show=[contour_layer,route_layer,tdt_layer])
-
-        # OSM地图+等高线+山体阴影+DEM高程渲染层
-        osm_points_layer = maker.load_vector_layer(maker.EXTENT_OSM_POINTS, maker.EXTENT_OSM_POINTS_LAYER_NAME,"POI图层样式.qml")
-        osm_lines_layer = maker.load_vector_layer(maker.EXTENT_OSM_LINES, maker.EXTENT_OSM_LINES_LAYER_NAME,"线图层样式.qml")
-        osm_multipolygons_layer = maker.load_vector_layer(maker.EXTENT_OSM_MULTIPOLYGONS, maker.EXTENT_OSM_MULTIPOLYGONS_LAYER_NAME,"面图层样式.qml")
-
-
-        dem_layer = maker.load_raster_layer(maker.EXTENT_DEM, maker.EXTENT_DEM_LAYER_NAME,"高程渲染层样式.qml")
-        dem_hillshade_layer = maker.load_raster_layer(maker.EXTENT_DEM_HILLSHADOW, maker.EXTENT_DEM_HILLSHADOW_LAYER_NAME,"山体阴影样式.qml")
-        maker.export_map_by_layout_templet(layers_to_show=[contour_layer,
-            route_layer,
-            osm_points_layer,osm_lines_layer,osm_multipolygons_layer,
-            dem_hillshade_layer,dem_layer])
-
-        print("\n=== 所有测试完成 ===")
-        return True
-        
-    except Exception as e:
-        print(f"工作流执行失败: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
-'''
 
 # 使用Haversine公式计算两点之间的距离
 def haversine_distance(lon1, lat1, lon2, lat2):
@@ -2470,40 +2026,53 @@ def gpx_to_map(gpx_file_path, project_dir):
         
         print(f"中心点坐标: ({center_lon:.6f}, {center_lat:.6f})")
         
-        # 4. 计算中心点到轨迹各点的最大距离（东西南北四个方向）
-        max_distance = 0
+        # 4. 计算中心点到轨迹各点的南北/东西最大距离
+        max_ns_distance = 0
+        max_ew_distance = 0
         for lon, lat in all_points:
-            distance = haversine_distance(center_lon, center_lat, lon, lat)
-            if distance > max_distance:
-                max_distance = distance
+            # 南北方向：根据纬度差计算
+            ns_distance = haversine_distance(center_lon, center_lat, center_lon, lat)
+            if ns_distance > max_ns_distance:
+                max_ns_distance = ns_distance
+            # 东西方向：根据经度差计算
+            ew_distance = haversine_distance(center_lon, center_lat, lon, center_lat)
+            if ew_distance > max_ew_distance:
+                max_ew_distance = ew_distance
         
-        print(f"中心点到轨迹的最大距离: {max_distance:.2f} 米")
+        print(f"中心点到轨迹的南北最大距离: {max_ns_distance:.2f} 米")
+        print(f"中心点到轨迹的东西最大距离: {max_ew_distance:.2f} 米")
         
-        # 5. 计算half_edge
+        # 5. 计算南北/东西的half_edge
         # 最大距离 + 500米，然后四舍五入到至少百米
-        half_edge_raw = max_distance + 500
+        half_ns_raw = max_ns_distance + 500
+        half_ew_raw = max_ew_distance + 500
         
         # 四舍五入到百米（100米的倍数）
-        half_edge = round(half_edge_raw / 100) * 100
+        half_ns = round(half_ns_raw / 100) * 100
+        half_ew = round(half_ew_raw / 100) * 100
         
-        print(f"half_edge计算: {max_distance:.2f} + 500 = {half_edge_raw:.2f} → 四舍五入后 {half_edge} 米")
+        print(f"南北half_edge计算: {max_ns_distance:.2f} + 500 = {half_ns_raw:.2f} → 四舍五入后 {half_ns} 米")
+        print(f"东西half_edge计算: {max_ew_distance:.2f} + 500 = {half_ew_raw:.2f} → 四舍五入后 {half_ew} 米")
         
         # 6. 计算边长（单位：公里）
-        side_length_km = (2 * half_edge) / 1000
+        north_south_length_km = (2 * half_ns) / 1000
+        east_west_length_km = (2 * half_ew) / 1000
         
-        print(f"生成的地图边长: {side_length_km:.2f} 公里")
+        print(f"生成的地图南北边长: {north_south_length_km:.2f} 公里")
+        print(f"生成的地图东西边长: {east_west_length_km:.2f} 公里")
         
         # 7. 创建项目目录
         os.makedirs(project_dir, exist_ok=True)
         
         # 8. 调用point_to_map生成地图
         print("\n=== 开始生成地图项目 ===")
-        success = point_to_map(center_lon, center_lat, side_length_km, project_dir, gpx_file_path)
+        success = point_to_map(center_lon, center_lat, north_south_length_km, east_west_length_km, project_dir, gpx_file_path)
         
         if success:
             print(f"\n=== GPX轨迹地图生成完成 ===")
             print(f"中心点: ({center_lon:.6f}, {center_lat:.6f})")
-            print(f"边长: {side_length_km:.2f} 公里")
+            print(f"南北边长: {north_south_length_km:.2f} 公里")
+            print(f"东西边长: {east_west_length_km:.2f} 公里")
             print(f"项目目录: {project_dir}")
         
         return success
@@ -2525,7 +2094,7 @@ def main_point_to_map():
   python make_qgis_headless.py
   
   # 指定参数
-  python make_qgis_headless.py --lon 113.370327 --lat 23.201580 --side 10 --project "C:/path/to/project"
+  python make_qgis_headless.py --lon 113.370327 --lat 23.201580 --ns-length 10 --ew-length 10 --project "C:/path/to/project"
         """
     )
     
@@ -2544,10 +2113,17 @@ def main_point_to_map():
     )
     
     parser.add_argument(
-        '--side', '--side-length',
+        '--ns-length', '--north-south-length',
         type=float,
         default=10,
-        help='边长，单位公里 (默认: 10)'
+        help='南北边长，单位公里 (默认: 10)'
+    )
+    
+    parser.add_argument(
+        '--ew-length', '--east-west-length',
+        type=float,
+        default=10,
+        help='东西边长，单位公里 (默认: 10)'
     )
     
     parser.add_argument(
@@ -2563,7 +2139,8 @@ def main_point_to_map():
     success = point_to_map(
         center_lon=args.lon,
         center_lat=args.lat,
-        side_length=args.side,
+        north_south_length=args.ns_length,
+        east_west_length=args.ew_length,
         project_dir=args.project
     )
     
@@ -2573,12 +2150,12 @@ def main_point_to_map():
 if __name__ == "__main__":
     # main_point_to_map()
 
-    # point_to_map(center_lon=113.428453, center_lat=23.191103, side_length=15, 
+    # point_to_map(center_lon=113.428453, center_lat=23.191103, north_south_length=15, east_west_length=10, 
     #     project_dir=r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto01", 
     #     gpx_file_path=r"C:\Users\Administrator\Desktop\QGIS\地图制作\火帽北山\2024-03-03 07 57 火北帽.gpx")
 
-    point_to_map(center_lon=113.428453, center_lat=23.191103, side_length=15, 
-        project_dir=r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto03")
+    point_to_map(center_lon=113.4079556, center_lat=23.2325528, north_south_length=6.8, east_west_length=8.1, 
+        project_dir=r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto04")
 
     # gpx_to_map(r"C:\Users\Administrator\Desktop\QGIS\地图制作\火帽北山\2024-03-03 07 57 火北帽.gpx", 
     #   r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto02")
