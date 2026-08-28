@@ -3,11 +3,14 @@ import os
 import sys
 import shutil
 import time
+import random
 import requests
 import subprocess
 import argparse
 import gpxpy
 import gpxpy.gpx
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 from PyQt5.QtCore import QMetaType
 from shapely.validation import make_valid
 from shapely.geometry import Point
@@ -57,6 +60,11 @@ class DemMakeQGISHeadless:
         self.TIANDITU_MAP = os.path.join(self.project_path, 'extent_satellite_map.tif')
         self.TIANDITU_MAP_LAYER_NAME = "extent_satellite_map"
         self.TIANDITU_MAP_TEMP = os.path.join(self.project_path, 'extent_satellite_map_temp.tif')
+
+        # Google地图影像
+        self.GOOGLE_MAP = os.path.join(self.project_path, 'extent_google_map.tif')
+        self.GOOGLE_MAP_LAYER_NAME = "extent_google_map"
+        self.GOOGLE_MAP_TEMP = os.path.join(self.project_path, 'extent_google_map_temp.tif')
 
         # OSM数据图层
         self.MAP_OSM = os.path.join(self.project_path, 'map.osm')
@@ -129,7 +137,8 @@ class DemMakeQGISHeadless:
 
 
         self.DPI = 300
-        self.LONGEST_SIDE = 420.0
+        # 打印地图最大边长
+        self.LONGEST_SIDE = 1000.0
         self.BLANK_PCT = 0.15
         self.BORDER = 10.0
 
@@ -509,10 +518,15 @@ class DemMakeQGISHeadless:
         
         return self._merge_tiles(tile_output_dir, zoom_level, (x_min, x_max), (y_min, y_max), lon_min, lon_max, lat_min, lat_max)
     # 拼接瓦片
-    def _merge_tiles(self, tile_output_dir, zoom, x_range, y_range, lon_min, lon_max, lat_min, lat_max):
+    def _merge_tiles(self, tile_output_dir, zoom, x_range, y_range, lon_min, lon_max, lat_min, lat_max, temp_jpg=None, tif_path=None):
         from PIL import Image
         from osgeo import gdal
         from pyproj import Transformer
+        
+        if temp_jpg is None:
+            temp_jpg = self.TIANDITU_MAP_TEMP
+        if tif_path is None:
+            tif_path = self.TIANDITU_MAP
         
         tile_width = 256
         tile_height = 256
@@ -535,8 +549,6 @@ class DemMakeQGISHeadless:
                     print(f"已拼接瓦片 ({x},{y})")
                 except Exception as e:
                     print(f"拼接失败 ({x},{y}): {str(e)}")
-        
-        temp_jpg = self.TIANDITU_MAP_TEMP
         
         merged.save(temp_jpg)
         print(f"\n拼接完成! 临时图像保存至: {temp_jpg}")
@@ -570,7 +582,6 @@ class DemMakeQGISHeadless:
         ]
         
         options = gdal.TranslateOptions(format='GTiff', outputSRS='EPSG:3857', GCPs=gcp_list)
-        tif_path = self.TIANDITU_MAP
         gdal.Translate(tif_path, temp_jpg, options=options)
         print(f"GeoTIFF保存至: {tif_path}")
         
@@ -619,6 +630,170 @@ class DemMakeQGISHeadless:
         )
 
         print("\n=== 天地图下载完成 ===")
+        return tif_path
+
+    # 下载Google地图瓦片（多线程并行版）
+    def _download_google_tiles(self, lon_min, lon_max, lat_min, lat_max, zoom_level=14,
+                               max_workers=16, max_retries=3):
+        """
+        并行下载 Google 卫星瓦片。
+
+        相对串行版的优化点：
+          1. 多线程并发下载（ThreadPoolExecutor，默认 16 线程，瓶颈通常在网络）。
+          2. 每个线程使用独立的 requests.Session，复用 TLS 连接，避免重复握手。
+          3. 每个线程使用独立 headers 副本，避免共享可变 dict 被覆盖（经验教训）。
+          4. 已下载的瓦片直接跳过（断点续传，重复运行不重下）。
+          5. 多域名轮询（mt0~mt3），突破单域名连接数/限速上限。
+          6. 失败指数退避重试（最多 max_retries 次）。
+          7. 线程锁保护的进度打印与计数。
+        """
+        # 多个 Google 瓦片子域名，线程轮询使用以分散负载
+        google_urls = [
+            'https://mt0.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
+            'https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
+            'https://mt2.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
+            'https://mt3.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
+        ]
+        # 基础 headers（每个线程会 .copy() 一份，不共享）
+        google_base_headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'keep-alive',
+        }
+
+        print(f"Google瓦片URL模板(共 {len(google_urls)} 个子域名轮询): {google_urls[0]}")
+
+        x_min, y_min = self._deg2num(lat_max, lon_min, zoom_level)
+        x_max, y_max = self._deg2num(lat_min, lon_max, zoom_level)
+
+        tile_output_dir = os.path.join(self.project_path, 'google_tiles')
+        os.makedirs(tile_output_dir, exist_ok=True)
+
+        total_tiles = (x_max - x_min + 1) * (y_max - y_min + 1)
+
+        # 先把所有 (x, y, 目标文件名) 构造成任务队列
+        tasks = []
+        for x in range(x_min, x_max + 1):
+            for y in range(y_min, y_max + 1):
+                filename = os.path.join(tile_output_dir, f'tile_{zoom_level}_{x}_{y}.jpg')
+                tasks.append((x, y, filename))
+
+        # 统计"已下载的瓦片数量"：预先扫描已存在文件，支持断点续传
+        existed = sum(1 for _, _, fn in tasks if os.path.exists(fn))
+        pending = total_tiles - existed
+
+        # 线程锁 + 原子计数器（保护并发写）
+        counter_lock = threading.Lock()
+        done = {'success': existed, 'fail': 0}
+
+        print(f"\n开始并行下载 Google 瓦片 (级别: {zoom_level}, 线程: {max_workers})...")
+        print(f"瓦片列范围: {x_min} 到 {x_max}")
+        print(f"瓦片行范围: {y_min} 到 {y_max}")
+        print(f"总瓦片数: {total_tiles}，已存在跳过: {existed}，待下载: {pending}")
+
+        # 线程局部对象：每个线程各自持有 1 个 Session，避免跨线程共享
+        tls = threading.local()
+
+        def _get_session():
+            """获取当前线程独有的 Session + headers（懒加载）"""
+            if not hasattr(tls, 'session'):
+                tls.session = requests.Session()
+                # 每个线程独立的 headers 副本
+                tls.session.headers.update(google_base_headers.copy())
+            return tls.session
+
+        def _download_one(x, y, filename):
+            """下载单个瓦片，返回 bool 成功与否。
+            内部自带：断点续传跳过、多域名轮询、指数退避重试。"""
+            # ① 断点续传：文件已存在且非空就跳过
+            if os.path.exists(filename) and os.path.getsize(filename) > 0:
+                return True
+
+            # ② 多域名轮询：挑一个随机的 mt{0..3}
+            url_tpl = random.choice(google_urls)
+            url = url_tpl.format(x=x, y=y, z=zoom_level)
+
+            sess = _get_session()
+
+            # ③ 指数退避重试：0s → 1s → 2s → 4s
+            last_err = None
+            for attempt in range(max_retries):
+                try:
+                    resp = sess.get(url, timeout=(5, 15))
+                    if resp.status_code != 200:
+                        last_err = f"HTTP {resp.status_code}"
+                        # 4xx 没必要重试
+                        if 400 <= resp.status_code < 500:
+                            break
+                        time.sleep(2 ** attempt)
+                        continue
+                    with open(filename, 'wb', buffering=1024 * 1024) as f:
+                        f.write(resp.content)
+                    return True
+                except Exception as e:
+                    last_err = str(e)
+                    time.sleep(2 ** attempt)
+
+            # 走到这里表示所有重试均失败
+            print(f"    下载失败 ({x},{y}): {last_err}")
+            return False
+
+        # ④ 提交所有任务到线程池
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            future_map = {
+                ex.submit(_download_one, x, y, fn): (x, y, fn)
+                for (x, y, fn) in tasks
+            }
+            for fut in as_completed(future_map):
+                ok = fut.result()
+                with counter_lock:
+                    if ok:
+                        done['success'] += 1
+                    else:
+                        done['fail'] += 1
+                    progress = done['success'] + done['fail']
+                    if progress % 25 == 0 or progress == total_tiles:
+                        print(f"  进度: {progress}/{total_tiles}  成功 {done['success']}  失败 {done['fail']}")
+
+        print(f"\nGoogle 瓦片并行下载完成! 成功 {done['success']} 个，失败 {done['fail']} 个")
+
+        return self._merge_tiles(
+            tile_output_dir, zoom_level, (x_min, x_max), (y_min, y_max),
+            lon_min, lon_max, lat_min, lat_max,
+            temp_jpg=self.GOOGLE_MAP_TEMP,
+            tif_path=self.GOOGLE_MAP
+        )
+
+    # 创建Google地图影像图层
+    def make_google_layer(self, zoom_level=14):
+        """
+        下载Google地图瓦片并生成GeoTIFF影像
+
+        参数:
+        zoom_level (int): 瓦片缩放级别
+
+        返回:
+        str: 成功返回Google影像文件路径，失败返回None
+        """
+        if os.path.exists(self.GOOGLE_MAP):
+            print(f"警告: Google地图影像已存在: {self.GOOGLE_MAP}")
+            print(f"跳过下载，直接使用已存在文件: {self.GOOGLE_MAP}")
+            return self.GOOGLE_MAP
+
+        if not os.path.exists(self.MAP_EXTENT_4326):
+            raise RuntimeError(f"{self.MAP_EXTENT_4326}不存在，请先创建")
+        print("\n=== 开始下载Google地图影像 ===")
+        extent = self._get_gpkg_extent()
+        tif_path = self._download_google_tiles(
+            extent['lon_min'],
+            extent['lon_max'],
+            extent['lat_min'],
+            extent['lat_max'],
+            zoom_level
+        )
+
+        print("\n=== Google地图下载完成 ===")
         return tif_path
 
 
@@ -731,7 +906,7 @@ class DemMakeQGISHeadless:
         
         if not os.path.exists(osm_file):
             print(f"错误: OSM文件不存在: {osm_file}")
-            return []
+            sys.exit(1)
         
         if layers is None:
             layers = ['points', 'lines', 'multipolygons']
@@ -1831,6 +2006,9 @@ def point_to_map(center_lon, center_lat, north_south_length, east_west_length, p
         # 生成天地图图层
         extent_tianditu_file = maker.make_tianditu_layer(zoom_level=18)
 
+        # 生成谷歌地图图层
+        extent_google_file = maker.make_google_layer(zoom_level=18)
+
         # 生成dem图层
         extent_dem_file = maker.extract_dem_by_extent(dem_files_dir=None, extent_gpkg=maker.MAP_EXTENT_4326)
 
@@ -1898,7 +2076,14 @@ def point_to_map(center_lon, center_lat, north_south_length, east_west_length, p
             layer_name=maker.TIANDITU_MAP_LAYER_NAME,
             layer_style=None
         )
-
+        
+        # 添加谷歌地图图层
+        maker.add_layer_to_project(
+            layer_path=extent_google_file,
+            layer_name=maker.GOOGLE_MAP_LAYER_NAME,
+            layer_style=None
+        )
+        
         # 添加等高线图层
         maker.add_layer_to_project(
             layer_path=extent_dem_contour_file,
@@ -2154,8 +2339,8 @@ if __name__ == "__main__":
     #     project_dir=r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto01", 
     #     gpx_file_path=r"C:\Users\Administrator\Desktop\QGIS\地图制作\火帽北山\2024-03-03 07 57 火北帽.gpx")
 
-    point_to_map(center_lon=113.4079556, center_lat=23.2325528, north_south_length=6.8, east_west_length=8.1, 
-        project_dir=r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto04")
+    point_to_map(center_lon=113.375531, center_lat=23.243997, north_south_length=5.5, east_west_length=6.5, 
+        project_dir=r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto2026082802")
 
     # gpx_to_map(r"C:\Users\Administrator\Desktop\QGIS\地图制作\火帽北山\2024-03-03 07 57 火北帽.gpx", 
     #   r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto02")
