@@ -26,11 +26,29 @@ TIANDITU_HEADERS = {
     'Connection': 'keep-alive'
 }
 
-TIANDITU_TK = 'a96ffd6582a7e32c0084d79f7976e182'
+TIANDITU_TK = 'ab6c93b744918ea333a0b0f9c4e9e15d'
 TIANDITU_WMTS_URL = f'http://t0.tianditu.gov.cn/img_w/wmts?tk={TIANDITU_TK}'
+
+# Overpass(OSM) 请求头：overpass-api.de 会封锁 requests 默认 UA(python-requests/*)并返回 406，
+# 预检与下载必须统一使用此自定义 UA（实测自定义 UA/curl UA 均返回 200）
+OSM_HEADERS = {
+    'User-Agent': 'QGIS Headless OSM Downloader/1.0 (https://github.com/kennymarx/DemoPyQGIS)',
+}
 
 
 class DemMakeQGISHeadless:
+    # Overpass(OSM) 服务器列表：预检时逐个网络测试，下载时直接使用测通的第一个
+    # type=map         : OSM Map API，GET + bbox 查询参数
+    # type=interpreter : Overpass QL 接口，POST + QL 查询语句
+    OVERPASS_SERVERS = [
+        {"name": "overpass-api.de(主)", "type": "map",
+         "url": "https://overpass-api.de/api/map",
+         "status_url": "https://overpass-api.de/api/status"},
+        {"name": "overpass.private.coffee(镜像)", "type": "interpreter",
+         "url": "https://overpass.private.coffee/api/interpreter",
+         "status_url": "https://overpass.private.coffee/api/status"},
+    ]
+
     def __init__(self, center_longitude, center_latitude, north_south_length_km, east_west_length_km, project_path):
         if north_south_length_km > 30:
             raise ValueError("南北边长不能大于30km")
@@ -132,15 +150,33 @@ class DemMakeQGISHeadless:
             self.EXTENT_DEM_HILLSHADOW_LAYER_NAME:os.path.join(self.TEMPLATE_PATH, "山体阴影样式.qml"),
             self.EXTENT_DEM_HILLSHADOW_EXAG_LAYER_NAME:os.path.join(self.TEMPLATE_PATH, "山体阴影样式.qml"),
             self.EXTENT_ROUTE_LAYER_NAME:os.path.join(self.TEMPLATE_PATH, "轨迹图层样式.qml"),
+            self.GOOGLE_MAP_LAYER_NAME:os.path.join(self.TEMPLATE_PATH, "谷歌卫图图层样式.qml"),
         }
 
+        # 打印模板
+        self.LAYOUT_MODEL_HORIZONTAL = os.path.join(self.PRINT_MODEL_PATH, "layoutmodel-横向.qpt")
+        self.LAYOUT_MODEL_HORIZONTAL_NAME = "layoutmodel-横向"
+        self.LAYOUT_MODEL_VERTICAL = os.path.join(self.PRINT_MODEL_PATH, "layoutmodel-纵向.qpt")
+        self.LAYOUT_MODEL_VERTICAL_NAME = "layoutmodel-纵向"
 
-
+        # 系统参数
         self.DPI = 300
         # 打印地图最大边长
+        self.SYS_PARAMS_LONGEST_SIDE = "Longest_side"
+        self.SYS_PARAMS_BLANK_PCT = "Blank_pct"
+        self.SYS_PARAMS_BORDER = "Border"
+        self.SYS_PARAMS_PROJECT_SCALE_PARM = "project_scale_parm"
+        self.SYS_PARAMS_BG_SATELLITE = "bg_satellite"
+
         self.LONGEST_SIDE = 1000.0
         self.BLANK_PCT = 0.15
         self.BORDER = 10.0
+        self.PROJECT_SCALE_PARM = 1.0
+        self.BG_SATELLITE_Y = 1
+        self.BG_SATELLITE_N = 0
+        self.SYS_PARAMS_MAP_TITLE = "map_title"
+        self.SYS_PARAMS_MAP_MAKER = "map_maker"
+        
 
         os.makedirs(self.project_path, exist_ok=True)
 
@@ -465,36 +501,79 @@ class DemMakeQGISHeadless:
         lat_rad = math.atan(math.sinh(math.pi * (1 - 2 * ytile / n)))
         lat_deg = math.degrees(lat_rad)
         return (lat_deg, lon_deg)
-    # 下载天地图瓦片
-    def _download_tianditu_tiles(self, lon_min, lon_max, lat_min, lat_max, zoom_level=14):
-        from owslib.wmts import WebMapTileService
-        from PIL import Image
-        from osgeo import gdal
-        from pyproj import Transformer
-        
-        print(f"TIANDITU_WMTS_URL: {TIANDITU_WMTS_URL}")
-        # 创建WMTS客户端
-        wmts = WebMapTileService(url=TIANDITU_WMTS_URL, headers=TIANDITU_HEADERS)
+    # 下载天地图瓦片（多线程并行版，与 _download_google_tiles 同一套设计）
+    def _download_tianditu_tiles(self, lon_min, lon_max, lat_min, lat_max, zoom_level=14,
+                                 max_workers=16, max_retries=3):
+        """
+        并行下载 天地图 卫星瓦片。
 
+        与串行版相比的优化点（与 Google 并行版保持同一套设计）：
+          1. 多线程并发下载（ThreadPoolExecutor，默认 16 线程，瓶颈通常在网络）。
+          2. 每个线程使用独立的 WMTS 客户端（owslib 非保证线程安全，
+             对应 Google 版的"每线程独立 Session"）。
+          3. 已下载的瓦片直接跳过（断点续传，重复运行不重下）。
+          4. 失败指数退避重试（最多 max_retries 次）。
+          5. 线程锁保护的进度打印与计数。
+        """
+        from owslib.wmts import WebMapTileService
+
+        print(f"TIANDITU_WMTS_URL: {TIANDITU_WMTS_URL}")
+        # 主线程先创建一次客户端，验证 URL/TK 可用（能力文档解析报错能尽早暴露）
+        WebMapTileService(url=TIANDITU_WMTS_URL, headers=TIANDITU_HEADERS)
         print("创建WMTS客户端 成功")
-        
+
         layer_name = 'img'
         tile_matrix_set = 'w'
-        
+
         x_min, y_min = self._deg2num(lat_max, lon_min, zoom_level)
         x_max, y_max = self._deg2num(lat_min, lon_max, zoom_level)
-        
+
         tile_output_dir = os.path.join(self.project_path, 'tianditu_tiles')
         os.makedirs(tile_output_dir, exist_ok=True)
-        
+
         total_tiles = (x_max - x_min + 1) * (y_max - y_min + 1)
-        count = 0
-        print(f"\n开始下载瓦片 (级别: {zoom_level})...")
-        print(f"瓦片列范围: {x_min} 到 {x_max}")
-        print(f"瓦片行范围: {y_min} 到 {y_max}")
-        
+
+        # 先把所有 (x, y, 目标文件名) 构造成任务队列
+        tasks = []
         for x in range(x_min, x_max + 1):
             for y in range(y_min, y_max + 1):
+                filename = os.path.join(tile_output_dir, f'tile_{zoom_level}_{x}_{y}.jpg')
+                tasks.append((x, y, filename))
+
+        # 统计"已下载的瓦片数量"：预先扫描已存在文件，支持断点续传
+        existed = sum(1 for _, _, fn in tasks if os.path.exists(fn))
+        pending = total_tiles - existed
+
+        # 线程锁 + 原子计数器（保护并发写）
+        counter_lock = threading.Lock()
+        done = {'success': existed, 'fail': 0}
+
+        print(f"\n开始并行下载 天地图 瓦片 (级别: {zoom_level}, 线程: {max_workers})...")
+        print(f"瓦片列范围: {x_min} 到 {x_max}")
+        print(f"瓦片行范围: {y_min} 到 {y_max}")
+        print(f"总瓦片数: {total_tiles}，已存在跳过: {existed}，待下载: {pending}")
+
+        # 线程局部对象：每个线程各自持有 1 个 WMTS 客户端，避免跨线程共享
+        tls = threading.local()
+
+        def _get_wmts():
+            """获取当前线程独有的 WMTS 客户端（懒加载）"""
+            if not hasattr(tls, 'wmts'):
+                tls.wmts = WebMapTileService(url=TIANDITU_WMTS_URL, headers=TIANDITU_HEADERS)
+            return tls.wmts
+
+        def _download_one(x, y, filename):
+            """下载单个瓦片，返回 bool 成功与否。
+            内部自带：断点续传跳过、指数退避重试。"""
+            # ① 断点续传：文件已存在且非空就跳过
+            if os.path.exists(filename) and os.path.getsize(filename) > 0:
+                return True
+
+            wmts = _get_wmts()
+
+            # ② 指数退避重试：0s → 1s → 2s → 4s
+            last_err = None
+            for attempt in range(max_retries):
                 try:
                     tile = wmts.gettile(
                         base_url=TIANDITU_WMTS_URL,
@@ -504,18 +583,42 @@ class DemMakeQGISHeadless:
                         row=y,
                         column=x,
                     )
-                    
-                
-                    filename = os.path.join(tile_output_dir, f'tile_{zoom_level}_{x}_{y}.jpg')
-                    with open(filename, 'wb') as f:
-                        f.write(tile.read())
-                    count += 1
-                    print(f"已下载 {count}/{total_tiles} 瓦片: {filename}")
+                    content = tile.read()
+                    # 空响应视为失败，进入重试
+                    if not content:
+                        last_err = "空响应"
+                        time.sleep(2 ** attempt)
+                        continue
+                    with open(filename, 'wb', buffering=1024 * 1024) as f:
+                        f.write(content)
+                    return True
                 except Exception as e:
-                    print(f"下载失败 ({x},{y}): {str(e)}")
-        
-        print(f"\n瓦片下载完成! 共下载 {count} 个瓦片")
-        
+                    last_err = str(e)
+                    time.sleep(2 ** attempt)
+
+            # 走到这里表示所有重试均失败
+            print(f"    下载失败 ({x},{y}): {last_err}")
+            return False
+
+        # ③ 提交所有任务到线程池
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            future_map = {
+                ex.submit(_download_one, x, y, fn): (x, y, fn)
+                for (x, y, fn) in tasks
+            }
+            for fut in as_completed(future_map):
+                ok = fut.result()
+                with counter_lock:
+                    if ok:
+                        done['success'] += 1
+                    else:
+                        done['fail'] += 1
+                    progress = done['success'] + done['fail']
+                    if progress % 25 == 0 or progress == total_tiles:
+                        print(f"  进度: {progress}/{total_tiles}  成功 {done['success']}  失败 {done['fail']}")
+
+        print(f"\n天地图 瓦片并行下载完成! 成功 {done['success']} 个，失败 {done['fail']} 个")
+
         return self._merge_tiles(tile_output_dir, zoom_level, (x_min, x_max), (y_min, y_max), lon_min, lon_max, lat_min, lat_max)
     # 拼接瓦片
     def _merge_tiles(self, tile_output_dir, zoom, x_range, y_range, lon_min, lon_max, lat_min, lat_max, temp_jpg=None, tif_path=None):
@@ -619,6 +722,18 @@ class DemMakeQGISHeadless:
 
         if not os.path.exists(self.MAP_EXTENT_4326):
             raise RuntimeError(f"{self.MAP_EXTENT_4326}不存在，请先创建")
+
+        # 网络连通性预检：失败则报警并跳过下载
+        print("\n[预检] 正在测试 天地图 服务器连通性...")
+        if not self._check_tianditu_network():
+            print("=" * 60)
+            print("!!! 网络报警: 天地图 服务器无法连接，请检查网络或 TK 配置 !!!")
+            print("=" * 60)
+            self._alert_beep()
+            print("跳过 天地图 下载")
+            return None
+
+        print("[预检] 网络连通正常")
         print("\n=== 开始下载天地图影像 ===")
         extent = self._get_gpkg_extent()
         tif_path = self._download_tianditu_tiles(
@@ -765,6 +880,283 @@ class DemMakeQGISHeadless:
             tif_path=self.GOOGLE_MAP
         )
 
+    # 通用网络连通性检查
+    def _check_network(self, url, timeout=5, headers=None):
+        """发送轻量 GET 请求探测服务器是否可达，返回 bool"""
+        try:
+            resp = requests.get(url, timeout=timeout, headers=headers)
+            ok = (resp.status_code == 200)
+            if not ok:
+                print(f"网络探测异常: HTTP {resp.status_code}")
+            return ok
+        except Exception as e:
+            print(f"网络探测失败: {e}")
+            return False
+
+    # 检查Google瓦片服务器网络连通性
+    def _check_google_network(self, timeout=5):
+        """用一个小瓦片请求探测 Google 瓦片服务器是否可达，返回 bool"""
+        return self._check_network('https://mt1.google.com/vt/lyrs=s&x=0&y=0&z=1', timeout)
+
+    # 网络测试各 Overpass(OSM) 服务器，返回第一个测通的服务器配置（全不通返回 None）
+    def _check_osm_network(self, timeout=5):
+        """逐个测试 OVERPASS_SERVERS 的状态接口，返回测通的服务器 dict 或 None"""
+        for server in self.OVERPASS_SERVERS:
+            # 必须带自定义 UA：overpass-api.de 封锁 requests 默认 UA(python-requests/*) 返回 406
+            ok = self._check_network(server["status_url"], timeout, headers=OSM_HEADERS)
+            print(f"  Overpass服务器 {server['name']}: {'可达' if ok else '不可达'}")
+            if ok:
+                return server
+        return None
+
+    # 检查天地图服务器网络连通性
+    def _check_tianditu_network(self, timeout=5):
+        """用一个小瓦片请求探测 天地图 服务器是否可达（同时验证TK有效性），返回 bool"""
+        probe_url = (
+            f'http://t0.tianditu.gov.cn/img_w/wmts?tk={TIANDITU_TK}'
+            f'&layer=img&style=default&tilematrixset=w&Service=WMTS'
+            f'&Request=GetTile&Version=1.0.0&Format=image/jpeg'
+            f'&TileMatrix=1&TileRow=0&TileCol=0'
+        )
+        # 浏览器端类型的 TK 会校验请求特征，必须带浏览器 UA，否则返回 403(错误码301012)
+        return self._check_network(probe_url, timeout, headers=TIANDITU_HEADERS)
+
+    # 报警提示音（Windows 下蜂鸣，其他平台静默跳过）
+    @staticmethod
+    def _alert_beep(times=3):
+        try:
+            import winsound
+            for _ in range(times):
+                winsound.Beep(1000, 300)  # 1000Hz, 300ms
+                time.sleep(0.2)
+        except Exception:
+            pass  # 非 Windows 或无声音设备时静默
+
+    # 读取 OSM 文件头(header)中的数据范围 bbox；无法判定时返回 None
+    def _get_osm_header_box(self, osm_path):
+        """
+        读取 OSM 文件(.osm/.osm.pbf) header 中记录的数据 bbox，
+        只读文件头不扫描数据体，大文件也秒回。
+
+        返回 (西, 南, 东, 北)；文件无 bbox 记录或读取失败返回 None。
+        """
+        try:
+            import osmium
+            reader = osmium.io.Reader(osm_path)
+            try:
+                box = reader.header().box()   # header 是方法，需调用后再取 box
+            finally:
+                reader.close()
+            if not box.valid():
+                return None
+            bl = box.bottom_left   # pyosmium 中为属性(非方法)，.lon/.lat 返回度数
+            tr = box.top_right
+            return (bl.lon, bl.lat, tr.lon, tr.lat)
+        except Exception:
+            return None
+
+    # 从本地 osm_files 目录查找可用的 OSM 资源（网络下载失败时的回退）
+    def _find_local_osm_file(self, extent=None):
+        """
+        在脚本所在目录的 osm_files/ 下查找本地 OSM 资源(.osm/.osm.pbf)。
+
+        挑选规则:
+          提供 extent(地图范围)时:
+            1. 优先在"数据范围(header bbox)包含地图范围"的文件中选体量最小的
+               （例如同时有全国 pbf 和省级 pbf 都覆盖地图范围时，自动选省文件）；
+            2. 若所有文件都无法判定数据范围（header 无 bbox），退回选体量最小的；
+            3. 明确不包含地图范围的文件直接跳过。
+          未提供 extent 时: 选体量最小的。
+
+        找到返回文件路径，找不到返回 None。
+        """
+        local_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'osm_files')
+        if not os.path.isdir(local_dir):
+            print(f"本地OSM资源目录不存在: {local_dir}")
+            return None
+
+        # 收集候选文件（排除 Office 临时文件 ~$ 开头），统一按体量挑选
+        candidates = []
+        for f in os.listdir(local_dir):
+            if f.lower().endswith(('.osm', '.osm.pbf')) and not f.startswith('~'):
+                path = os.path.join(local_dir, f)
+                candidates.append((path, os.path.getsize(path)))
+
+        if not candidates:
+            print(f"本地OSM资源目录中无可用文件(.osm/.osm.pbf): {local_dir}")
+            return None
+
+        # 未提供地图范围：直接选体量最小的
+        if extent is None:
+            path, size = min(candidates, key=lambda t: t[1])
+            print(f"找到本地OSM资源: {path} ({size / (1024 * 1024):.1f} MB)")
+            return path
+
+        # 读取各文件的数据范围 bbox，分为"包含地图范围"与"无法判定"两组
+        containing, unknown = [], []
+        for path, size in candidates:
+            box = self._get_osm_header_box(path)
+            if box is None:
+                unknown.append((path, size))
+                continue
+            west, south, east, north = box
+            if (west <= extent['lon_min'] and east >= extent['lon_max']
+                    and south <= extent['lat_min'] and north >= extent['lat_max']):
+                containing.append((path, size))
+            else:
+                print(f"  跳过(数据范围不含地图范围): {path} "
+                      f"(bbox: {west:.2f},{south:.2f},{east:.2f},{north:.2f})")
+
+        # 优先: 包含地图范围的文件中选体量最小的
+        if containing:
+            containing.sort(key=lambda t: t[1])
+            for path, size in containing:
+                print(f"  候选(包含地图范围): {path} ({size / (1024 * 1024):.1f} MB)")
+            path, size = containing[0]
+            print(f"选择体量最小的候选: {path} ({size / (1024 * 1024):.1f} MB)")
+            return path
+
+        # 回退: 都无法判定数据范围时，选体量最小的（保持流程可用）
+        if unknown:
+            path, size = min(unknown, key=lambda t: t[1])
+            print(f"所有文件均无法判定数据范围，回退选体量最小: {path} ({size / (1024 * 1024):.1f} MB)")
+            return path
+
+        print("本地OSM资源均不包含地图范围，无法使用")
+        return None
+
+    # 用 pyosmium 按地图范围从本地 OSM 数据提取子集（避免对全国级大文件做全量转换）
+    def _extract_osm_subset(self, local_osm_path, extent):
+        """
+        按地图范围(extent)从本地 OSM 数据(.osm/.osm.pbf)提取子集，
+        输出到项目目录下的 map.osm.pbf。
+
+        使用 pyosmium(Python 库)两遍扫描实现，等价于
+        `osmium extract --strategy complete_ways`:
+          第一遍: 判定并收集——bbox 内的节点、与 bbox 相交的 way（并记录
+                  其引用的全部节点，含 bbox 外节点，保证跨边界几何完整）、
+                  成员被保留的 relation；
+          第二遍: 按 node -> way -> relation 的规范顺序写出子集。
+
+        依赖: pip install osmium
+        成功返回子集路径；库缺失或提取失败返回 None（调用方回退为直接
+        使用原文件）。
+        """
+        try:
+            import osmium   # 惰性导入：未安装时其余功能不受影响
+        except ImportError:
+            print("警告: 未安装 pyosmium 库，跳过子集提取")
+            print("      安装后可大幅加速本地回退处理: pip install osmium")
+            return None
+
+        out_path = os.path.join(self.project_path, 'map.osm.pbf')
+
+        # 子集已存在则直接复用（避免重复提取）
+        if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+            print(f"OSM子集已存在，直接使用: {out_path}")
+            return out_path
+
+        # bbox 顺序：西,南,东,北
+        west = extent['lon_min']
+        south = extent['lat_min']
+        east = extent['lon_max']
+        north = extent['lat_max']
+        print(f"按地图范围提取OSM子集 (bbox: {west},{south},{east},{north}) ...")
+
+        try:
+            start_time = time.time()
+
+            # ---- 第一遍：判定与收集（pbf 中节点/way/relation 按类型分块存储，
+            #      处理 way 时全部节点已回调完毕，relation 时全部 way 已处理完）----
+            node_ids = set()   # bbox 内的 node id
+            way_ids = set()    # 与 bbox 相交的 way id
+            way_refs = {}      # way_id -> 引用的全部节点 id（含 bbox 外，补齐跨边界节点）
+            rel_ids = set()    # 成员被保留的 relation id
+
+            class CollectHandler(osmium.SimpleHandler):
+                _count = 0
+
+                def node(self, n):
+                    CollectHandler._count += 1
+                    if CollectHandler._count % 10000000 == 0:
+                        print(f"  第一遍扫描中... 已处理 {CollectHandler._count} 个节点")
+                    if n.location.valid() and west <= n.location.lon <= east and south <= n.location.lat <= north:
+                        node_ids.add(n.id)
+
+                def way(self, w):
+                    refs = [nd.ref for nd in w.nodes]
+                    if any(ref in node_ids for ref in refs):
+                        way_ids.add(w.id)
+                        way_refs[w.id] = refs
+
+                def relation(self, r):
+                    for m in r.members:
+                        if (m.type == 'w' and m.ref in way_ids) or (m.type == 'n' and m.ref in node_ids):
+                            rel_ids.add(r.id)
+                            break
+
+            CollectHandler().apply_file(local_osm_path, locations=False)
+
+            # 需写出的节点 = bbox 内节点 + 相交 way 引用的全部节点（含 bbox 外）
+            referenced_nodes = set(node_ids)
+            for refs in way_refs.values():
+                referenced_nodes.update(refs)
+
+            if not way_ids:
+                print("警告: 地图范围内没有找到任何 OSM 数据（way 为空），请检查范围与数据是否匹配")
+            print(f"  第一遍完成: bbox内节点 {len(node_ids)} | 相交way {len(way_ids)} | "
+                  f"关联relation {len(rel_ids)} | 需写出节点 {len(referenced_nodes)} | "
+                  f"用时 {time.time() - start_time:.0f} 秒")
+
+            # ---- 第二遍：按 node -> way -> relation 的规范顺序写出子集 ----
+            writer = osmium.SimpleWriter(out_path)
+
+            class WriteHandler(osmium.SimpleHandler):
+                def node(self, n):
+                    if n.id in referenced_nodes:
+                        writer.add_node(n)
+
+                def way(self, w):
+                    if w.id in way_ids:
+                        writer.add_way(w)
+
+                def relation(self, r):
+                    if r.id in rel_ids:
+                        writer.add_relation(r)
+
+            WriteHandler().apply_file(local_osm_path, locations=False)
+            writer.close()
+
+            size_mb = os.path.getsize(out_path) / (1024 * 1024)
+            print(f"OSM子集提取完成: {out_path} ({size_mb:.1f} MB), "
+                  f"总用时 {time.time() - start_time:.0f} 秒")
+            return out_path
+        except Exception as e:
+            # 清理可能不完整的输出文件，避免下次误判为已缓存
+            if os.path.exists(out_path):
+                try:
+                    os.remove(out_path)
+                except OSError:
+                    pass
+            print(f"OSM子集提取失败: {e}")
+            return None
+
+    # 本地回退：报警并从 osm_files 寻找本地 OSM 资源，按范围提取子集后返回路径或 None
+    def _fallback_local_osm(self):
+        """下载/预检失败时的统一回退入口：蜂鸣报警 + 本地资源查找 + 子集提取"""
+        self._alert_beep()
+        print("尝试从本地 osm_files 目录回退...")
+        # 先取地图范围，用于挑选"包含范围且体量最小"的本地数据
+        extent = self._get_gpkg_extent()
+        local_osm = self._find_local_osm_file(extent)
+        if not local_osm:
+            print("本地无可用OSM资源")
+            return None
+        print(f"使用本地OSM资源替代网络下载: {local_osm}")
+        # 按地图范围提取子集（全国级大 pbf 直接全量转换非常慢）
+        subset = self._extract_osm_subset(local_osm, extent)
+        return subset if subset else local_osm
+
     # 创建Google地图影像图层
     def make_google_layer(self, zoom_level=14):
         """
@@ -783,6 +1175,18 @@ class DemMakeQGISHeadless:
 
         if not os.path.exists(self.MAP_EXTENT_4326):
             raise RuntimeError(f"{self.MAP_EXTENT_4326}不存在，请先创建")
+
+        # 网络连通性预检：失败则报警并跳过下载
+        print("\n[预检] 正在测试 Google 瓦片服务器连通性...")
+        if not self._check_google_network():
+            print("=" * 60)
+            print("!!! 网络报警: Google 瓦片服务器无法连接，请检查网络/代理 !!!")
+            print("=" * 60)
+            self._alert_beep()
+            print("跳过 Google 地图下载")
+            return None
+
+        print("[预检] 网络连通正常")
         print("\n=== 开始下载Google地图影像 ===")
         extent = self._get_gpkg_extent()
         tif_path = self._download_google_tiles(
@@ -801,13 +1205,16 @@ class DemMakeQGISHeadless:
     def download_osm_data(self, output_file=None, timeout=300):
         """
         从OpenStreetMap下载指定区域的全量OSM数据并保存为.osm格式文件
-        
+
+        网络预检失败时，自动回退使用脚本目录 osm_files/ 下的本地OSM资源
+        （.osm 或 .osm.pbf，ogr2ogr 原生支持 pbf，后续流程无需转换）。
+
         参数:
         output_file (str): 输出文件路径，默认为项目目录下的map.osm
         timeout (int): 请求超时时间（秒），默认为300秒
-        
+
         返回:
-        str: OSM文件路径，如果下载失败返回None
+        str: OSM文件路径（网络下载或本地回退），失败返回None
         """
 
         # 检查OSM文件是否存在
@@ -817,45 +1224,74 @@ class DemMakeQGISHeadless:
 
         if not os.path.exists(self.MAP_EXTENT_4326):
             raise RuntimeError(f"{self.MAP_EXTENT_4326}不存在，请先创建")
-        
+
+        # 网络预检：逐个测试服务器，测通的第一个直接用于下载（下载时不再重新尝试其他服务器）
+        print("\n[预检] 正在测试 Overpass(OSM) 服务器连通性...")
+        server = self._check_osm_network()
+        if server is None:
+            print("=" * 60)
+            print("!!! 网络报警: 所有 Overpass(OSM) 服务器均无法连接，请检查网络/代理 !!!")
+            print("=" * 60)
+            local_osm = self._fallback_local_osm()
+            return local_osm if local_osm else None
+
+        print(f"[预检] 使用服务器: {server['name']} ({server['url']})")
+
         extent = self._get_gpkg_extent()
         min_lon = extent['lon_min']
         min_lat = extent['lat_min']
         max_lon = extent['lon_max']
         max_lat = extent['lat_max']
-        
+
         if output_file is None:
             output_file = os.path.join(self.project_path, 'map.osm')
-        
-        overpass_url = "https://overpass-api.de/api/map"
+
         query_params = {
             "bbox": f"{min_lon}, {min_lat}, {max_lon}, {max_lat}"
         }
-        
-        headers = {
-            "User-Agent": "QGIS Headless OSM Downloader/1.0 (https://github.com/kennymarx/DemoPyQGIS)"
-        }
-        
+        # Overpass QL 查询（供 interpreter 类服务器使用），bbox 顺序：南,西,北,东
+        ql_query = (
+            f"[out:xml][timeout:{timeout}];"
+            f"(node({min_lat},{min_lon},{max_lat},{max_lon});"
+            f"way({min_lat},{min_lon},{max_lat},{max_lon});"
+            f"relation({min_lat},{min_lon},{max_lat},{max_lon}););"
+            f"(._;>;);"   # 递归补齐 way/relation 引用的节点，保证几何完整
+            f"out body;"
+        )
+
+        headers = OSM_HEADERS
+
         print(f"\n=== 开始下载OSM数据 ===")
         print(f"边界框: {min_lon:.6f}, {min_lat:.6f}, {max_lon:.6f}, {max_lat:.6f}")
         print(f"目标文件: {output_file}")
-        
+
         try:
             start_time = time.time()
-            response = requests.get(
-                overpass_url, 
-                params=query_params, 
-                headers=headers, 
-                timeout=timeout, 
-                stream=True
-            )
-            
+            if server["type"] == "map":
+                # Map API: GET + bbox 查询参数
+                response = requests.get(
+                    server["url"],
+                    params=query_params,
+                    headers=headers,
+                    timeout=timeout,
+                    stream=True
+                )
+            else:
+                # Interpreter API: POST + Overpass QL
+                response = requests.post(
+                    server["url"],
+                    data={"data": ql_query},
+                    headers=headers,
+                    timeout=timeout,
+                    stream=True
+                )
+
             if response.status_code == 200:
                 total_size = int(response.headers.get('content-length', 0))
                 block_size = 1024
-                
+
                 os.makedirs(os.path.dirname(output_file) or '.', exist_ok=True)
-                
+
                 with open(output_file, 'wb') as file:
                     downloaded_size = 0
                     for data in response.iter_content(block_size):
@@ -864,30 +1300,32 @@ class DemMakeQGISHeadless:
                         if total_size > 0:
                             progress = (downloaded_size / total_size) * 100
                             print(f"\r下载进度: {progress:.1f}% ({downloaded_size / 1024:.1f} KB)", end='')
-                
+
                 download_time = time.time() - start_time
                 file_size = os.path.getsize(output_file)
                 print(f"\n下载完成！文件大小: {file_size / (1024 * 1024):.2f} MB")
                 print(f"下载用时: {download_time:.2f} 秒")
                 print("=== OSM数据下载完成 ===")
-                
+
                 return output_file
             else:
                 print(f"下载失败，状态码: {response.status_code}")
-                print(f"错误信息: {response.text}")
                 if "Request size too large" in response.text:
                     print("提示: 请求的区域可能太大。请尝试减小边界框的大小。")
-                return None
-                
+
         except requests.exceptions.Timeout:
             print(f"请求超时，超时时间: {timeout} 秒")
-            return None
         except requests.exceptions.RequestException as e:
             print(f"发生网络错误: {e}")
-            return None
         except Exception as e:
             print(f"发生未知错误: {e}")
-            return None
+
+        # 下载失败：报警并回退本地资源
+        print("=" * 60)
+        print("!!! 网络下载失败，尝试本地回退 !!!")
+        print("=" * 60)
+        local_osm = self._fallback_local_osm()
+        return local_osm if local_osm else None
     # 提取OSM数据到GPKG文件
     def extract_osm_to_gpkg(self, osm_file=None, layers=None):
         """
@@ -904,22 +1342,36 @@ class DemMakeQGISHeadless:
         if osm_file is None:
             osm_file = os.path.join(self.project_path, 'map.osm')
         
+        if layers is None:
+            layers = ['points', 'lines', 'multipolygons']
+
+        output_files = {}
+
+        # 断点续传：产物已存在且非空的图层直接复用，只提取缺失图层
+        pending_layers = []
+        for layer in layers:
+            output_file = os.path.join(self.project_path, f'osm_{layer}.gpkg')
+            if os.path.exists(output_file) and os.path.getsize(output_file) > 0:
+                print(f"跳过提取(产物已存在): {os.path.basename(output_file)}")
+                output_files[layer] = output_file
+            else:
+                pending_layers.append(layer)
+
+        if not pending_layers:
+            print("全部OSM图层产物已存在，跳过提取")
+            return output_files
+
         if not os.path.exists(osm_file):
             print(f"错误: OSM文件不存在: {osm_file}")
             sys.exit(1)
-        
-        if layers is None:
-            layers = ['points', 'lines', 'multipolygons']
-        
-        output_files = {}
-        
+
         print(f"\n=== 开始提取OSM数据 ===")
         print(f"输入文件: {osm_file}")
-        print(f"要提取的图层: {layers}")
-        
-        for layer in layers:
+        print(f"待提取图层: {pending_layers}")
+
+        for layer in pending_layers:
             output_file = os.path.join(self.project_path, f'osm_{layer}.gpkg')
-            
+
             cmd = [
                 'ogr2ogr',
                 '-f', 'GPKG',
@@ -954,19 +1406,46 @@ class DemMakeQGISHeadless:
     def log_step(self, message):
         print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [OSM相交] {message}", flush=True)
 
+    # 检查OSM相交产物是否已全部生成（断点续传）
+    def _get_cached_extent_osm_files(self):
+        """
+        检查三个OSM相交产物(extent_osm_*.gpkg)是否全部存在且非空。
+
+        全部存在返回 {layer_type: 文件路径} 字典；任一缺失返回 None。
+        """
+        products = {
+            'points': self.EXTENT_OSM_POINTS,
+            'lines': self.EXTENT_OSM_LINES,
+            'multipolygons': self.EXTENT_OSM_MULTIPOLYGONS,
+        }
+        missing = [p for p in products.values()
+                   if not (os.path.exists(p) and os.path.getsize(p) > 0)]
+        if missing:
+            for p in missing:
+                print(f"OSM相交产物缺失: {os.path.basename(p)}")
+            return None
+        print("OSM相交产物已全部存在，跳过OSM下载/提取/相交")
+        return products
+
     # 相交OSM图层与地图范围图层
     def intersect_osm_with_extent(self, extent_gpkg=None, osm_layers=None):
         """
         将OSM图层与地图范围图层进行相交运算，只保留落在地图范围内的OSM数据
-        
+
         参数:
         extent_gpkg (str): 地图范围GPKG文件路径，默认为项目目录下的"地图范围"
         osm_layers (dict): OSM图层字典，key为类型名，value为图层文件路径
                           默认为项目目录下的osm_points.gpkg, osm_lines.gpkg, osm_multipolygons.gpkg
-        
+
         返回:
         dict: 相交结果文件路径字典，key为类型名，value为输出文件路径
         """
+        # 断点续传：相交产物全部已存在时直接返回（避免无谓的读取与运算）
+        cached = self._get_cached_extent_osm_files()
+        if cached is not None:
+            self.log_step("相交产物已全部存在，跳过相交运算")
+            return cached
+
         import geopandas as gpd
         from shapely.errors import TopologicalError
 
@@ -1013,6 +1492,12 @@ class DemMakeQGISHeadless:
             return {}
         
         for layer_type, osm_file in osm_layers.items():
+            # 断点续传：该层相交产物已存在且非空时跳过，只处理缺失图层
+            output_file = os.path.join(self.project_path, f'extent_osm_{layer_type}.gpkg')
+            if os.path.exists(output_file) and os.path.getsize(output_file) > 0:
+                self.log_step(f"跳过相交(产物已存在): {os.path.basename(output_file)}")
+                result_files[layer_type] = output_file
+                continue
             self.log_step(f"开始处理 {layer_type} 图层: {osm_file}")
             if not os.path.exists(osm_file):
                 print(f"警告: OSM文件不存在，跳过: {osm_file}")
@@ -1654,16 +2139,100 @@ class DemMakeQGISHeadless:
         
 
     # 20260524，改成通用打印模式
-    def export_map_by_layout_templet(self,layers_to_show=[],map_title="广州蓝天救援协会龙腾牛奔训练地图",map_maker="1121-奀奀的排骨"):
+    # 将打印布局模板(qpt)添加到当前 QGIS 工程
+    def add_layout_templet(self, qpt_path, layout_name):
+        """
+        把打印布局模板(.qpt)注册到工程的布局管理器，随 save_project 一起保存。
+
+        参数:
+        qpt_path (str): qpt 模板文件路径
+        layout_name (str): 布局名称（同名布局已存在时会先移除，避免重复）
+
+        返回:
+        bool: 添加成功返回 True，失败返回 False（不中断后续流程）
+        """
+        from qgis.core import (
+            QgsProject,
+            QgsPrintLayout,
+            QgsReadWriteContext,
+            QgsPathResolver
+        )
+        from qgis.PyQt.QtXml import QDomDocument
+
+        if not os.path.exists(qpt_path):
+            print(f"[错误] 找不到布局模板：{qpt_path}")
+            return False
+
+        project = QgsProject.instance()
+        layout_manager = project.layoutManager()
+
+        # 同名布局已存在时先移除，避免重复添加
+        for existing in layout_manager.layouts():
+            if existing.name() == layout_name:
+                layout_manager.removeLayout(existing)
+                print(f"[OK] 已移除同名布局：{layout_name}")
+
+        # 解析 qpt 模板
+        doc = QDomDocument()
+        with open(qpt_path, "r", encoding="utf-8") as f:
+            qpt_xml = f.read()
+        ok, err_msg, err_line, err_col = doc.setContent(qpt_xml)
+        if not ok:
+            print(f"[错误] QPT XML 解析失败（第 {err_line} 行，列 {err_col}）：{err_msg}")
+            return False
+
+        # 从模板加载布局项
+        layout = QgsPrintLayout(project)
+        layout.initializeDefaults()
+        ctx = QgsReadWriteContext()
+        ctx.setPathResolver(QgsPathResolver(qpt_path))
+        loaded_items, loaded_ok = layout.loadFromTemplate(doc, ctx, True)
+        if not loaded_ok:
+            print(f"[错误] 布局模板加载失败：{qpt_path}")
+            return False
+        layout.setName(layout_name)
+
+        layout_manager.addLayout(layout)
+        print(f"[OK] 打印布局已添加到工程：{layout_name} <- {qpt_path}（{len(loaded_items)} 个布局项）")
+        return True
+
+    def export_map_by_layout_templet(self,layers_to_show=[],
+        map_title="广州蓝天救援协会龙腾牛奔训练地图",
+        map_maker="1121-奀奀的排骨",
+        bg_satellite=None,
+        blank_pct=None,
+        border=None,
+        longest_side=None,
+        project_scale_parm=None
+        ):
         """
         打印地图
         
         参数:
         layers_to_show (list): 要在打印图中显示的图层列表。
+        map_title (str): 地图标题。
+        map_maker (str): 地图制作人。
+        bg_satellite (str): 背景卫星图层。
+        blank_pct (float): 空白比例。
+        border (float): 边框宽度。
+        longest_side (float): 最长边长度。
+        project_scale_parm (float): 项目比例参数。
         
         返回:
         None
         """
+        # 参数默认值在类定义时求值（此时 self 尚不存在），故用 None 哨兵，这里回退到实例属性
+        if bg_satellite is None:
+            bg_satellite = self.BG_SATELLITE_N
+        if blank_pct is None:
+            blank_pct = self.BLANK_PCT
+        if border is None:
+            border = self.BORDER
+        if longest_side is None:
+            longest_side = self.LONGEST_SIDE
+        if project_scale_parm is None:
+            project_scale_parm = self.PROJECT_SCALE_PARM
+            
         from qgis.core import (
             QgsProject,
             QgsPrintLayout,
@@ -1708,11 +2277,11 @@ class DemMakeQGISHeadless:
 
         # 只需要在打印图项目中添加地图范围。
         project_print.addMapLayer(extent_map_layer,False)
-        QgsExpressionContextUtils.setProjectVariable(project_print, "bg_satellite", '0')
-        QgsExpressionContextUtils.setProjectVariable(project_print, "Blank_pct", '0.15')
-        QgsExpressionContextUtils.setProjectVariable(project_print, "Border", '10')
-        QgsExpressionContextUtils.setProjectVariable(project_print, "Longest_side", self.LONGEST_SIDE)
-        QgsExpressionContextUtils.setProjectVariable(project_print, "project_scale_parm", '1')
+        QgsExpressionContextUtils.setProjectVariable(project_print, self.SYS_PARAMS_BG_SATELLITE, bg_satellite)
+        QgsExpressionContextUtils.setProjectVariable(project_print, self.SYS_PARAMS_BORDER, border)
+        QgsExpressionContextUtils.setProjectVariable(project_print, self.SYS_PARAMS_LONGEST_SIDE, longest_side)
+        QgsExpressionContextUtils.setProjectVariable(project_print, self.SYS_PARAMS_PROJECT_SCALE_PARM, project_scale_parm)
+        QgsExpressionContextUtils.setProjectVariable(project_print, self.SYS_PARAMS_BLANK_PCT, blank_pct)
 
         if not os.path.exists(self.QPT_PATH):
             print(f"[错误] 找不到布局模板：{self.QPT_PATH}")
@@ -1748,11 +2317,13 @@ class DemMakeQGISHeadless:
 
         print(f"[OK] {self.QPT_PATH} 布局模板已加载，共 {len(loaded_items)} 个布局项")
 
-        QgsExpressionContextUtils.setLayoutVariable(layout, "Longest_side", self.LONGEST_SIDE)
-        QgsExpressionContextUtils.setLayoutVariable(layout, "Blank_pct", self.BLANK_PCT)
-        QgsExpressionContextUtils.setLayoutVariable(layout, "Border", self.BORDER)
-        QgsExpressionContextUtils.setLayoutVariable(layout, "map_title", map_title)
-        QgsExpressionContextUtils.setLayoutVariable(layout, "map_maker", map_maker)
+        QgsExpressionContextUtils.setLayoutVariable(layout, self.SYS_PARAMS_BG_SATELLITE, bg_satellite)
+        QgsExpressionContextUtils.setLayoutVariable(layout, self.SYS_PARAMS_BORDER, border)
+        QgsExpressionContextUtils.setLayoutVariable(layout, self.SYS_PARAMS_LONGEST_SIDE, longest_side)
+        QgsExpressionContextUtils.setLayoutVariable(layout, self.SYS_PARAMS_PROJECT_SCALE_PARM, project_scale_parm)
+        QgsExpressionContextUtils.setLayoutVariable(layout, self.SYS_PARAMS_BLANK_PCT, blank_pct)
+        QgsExpressionContextUtils.setLayoutVariable(layout, self.SYS_PARAMS_MAP_TITLE, map_title)
+        QgsExpressionContextUtils.setLayoutVariable(layout, self.SYS_PARAMS_MAP_MAKER, map_maker)
 
         print(f"[OK] 布局变量已设置：Longest_side={self.LONGEST_SIDE}, Blank_pct={self.BLANK_PCT}, Border={self.BORDER}")
 
@@ -1793,24 +2364,6 @@ class DemMakeQGISHeadless:
 
         page_sz = page.pageSize()
         print(f"[OK] page.pageSize() = {page_sz.width():.2f} x {page_sz.height():.2f} mm")
-
-        ''' 所有要输出的元素包围盒
-        
-        all_items = layout.items()
-        if all_items:
-            union_rect = all_items[0].sceneBoundingRect()
-            for it in all_items[1:]:
-                union_rect = union_rect.united(it.sceneBoundingRect())
-            print(f"[OK] 所有元素包围盒（场景mm）：({union_rect.x():.2f},{union_rect.y():.2f}) "
-                  f"{union_rect.width():.2f} x {union_rect.height():.2f} mm")
-        else:
-            union_rect = QRectF(0, 0, page_sz.width(), page_sz.height())
-
-        render_w = max(page_sz.width(), union_rect.right())
-        render_h = max(page_sz.height(), union_rect.bottom())
-        render_rect = QRectF(0, 0, render_w, render_h)
-        print(f"[OK] 采用所有元素包围盒，最终渲染区域：{render_w:.2f} x {render_h:.2f} mm")
-        '''
 
         # 采用打印页面尺寸
         render_w = page_sz.width()
@@ -2032,14 +2585,17 @@ def point_to_map(center_lon, center_lat, north_south_length, east_west_length, p
             print(f"生成轨迹图层: {gpx_file_path}")
             extent_route_file = maker.make_route_layer(gpx_file_path)
 
-        # 下载OSM数据图层
-        osm_file = maker.download_osm_data()
+        # OSM数据处理：相交产物(extent_osm_*.gpkg)已全部生成时，跳过下载/提取/相交（断点续传）
+        extent_osm_files = maker._get_cached_extent_osm_files()
+        if extent_osm_files is None:
+            # 下载OSM数据图层
+            osm_file = maker.download_osm_data()
 
-        # 提取osm数据图层
-        osm_gpkg_files = maker.extract_osm_to_gpkg(osm_file)
+            # 提取osm数据图层
+            osm_gpkg_files = maker.extract_osm_to_gpkg(osm_file)
 
-        # 生成osm相交图层
-        extent_osm_files = maker.intersect_osm_with_extent(extent_gpkg=maker.MAP_EXTENT_4326, osm_layers=osm_gpkg_files)
+            # 生成osm相交图层
+            extent_osm_files = maker.intersect_osm_with_extent(extent_gpkg=maker.MAP_EXTENT_4326, osm_layers=osm_gpkg_files)
 
         # 添加图层到项目 ===========================
         # 添加dem图层
@@ -2074,14 +2630,14 @@ def point_to_map(center_lon, center_lat, north_south_length, east_west_length, p
         maker.add_layer_to_project(
             layer_path=extent_tianditu_file,
             layer_name=maker.TIANDITU_MAP_LAYER_NAME,
-            layer_style=None
+            layer_style=maker.DEFAULT_TEMPLATE[maker.GOOGLE_MAP_LAYER_NAME]
         )
         
         # 添加谷歌地图图层
         maker.add_layer_to_project(
             layer_path=extent_google_file,
             layer_name=maker.GOOGLE_MAP_LAYER_NAME,
-            layer_style=None
+            layer_style=maker.DEFAULT_TEMPLATE[maker.GOOGLE_MAP_LAYER_NAME]
         )
         
         # 添加等高线图层
@@ -2116,6 +2672,10 @@ def point_to_map(center_lon, center_lat, north_south_length, east_west_length, p
                 layer_style=maker.DEFAULT_TEMPLATE[maker.EXTENT_ROUTE_LAYER_NAME]
             )
 
+        # 添加打印模板-横向 layoutmodel-横向.qpt
+        maker.add_layout_templet(maker.LAYOUT_MODEL_HORIZONTAL, maker.LAYOUT_MODEL_HORIZONTAL_NAME)
+        # 添加打印模板-纵向 layoutmodel-纵向.qpt
+        maker.add_layout_templet(maker.LAYOUT_MODEL_VERTICAL, maker.LAYOUT_MODEL_VERTICAL_NAME)
 
         # 保存项目
         print("保存项目...")
@@ -2131,9 +2691,9 @@ def point_to_map(center_lon, center_lat, north_south_length, east_west_length, p
         else:
             route_layer = None
 
-        tdt_layer = maker.load_raster_layer(maker.TIANDITU_MAP, maker.TIANDITU_MAP_LAYER_NAME)
+        tdt_layer = maker.load_raster_layer(maker.GOOGLE_MAP, maker.GOOGLE_MAP_LAYER_NAME,maker.DEFAULT_TEMPLATE[maker.GOOGLE_MAP_LAYER_NAME])
         contour_layer = maker.load_vector_layer(maker.CONTOUR_FILE, maker.CONTOUR_LAYER_NAME,maker.DEFAULT_TEMPLATE[maker.CONTOUR_LAYER_NAME])
-        maker.export_map_by_layout_templet(layers_to_show=[contour_layer,route_layer,tdt_layer])
+        maker.export_map_by_layout_templet(layers_to_show=[contour_layer,route_layer,tdt_layer],bg_satellite=maker.BG_SATELLITE_Y)
 
         # OSM地图+等高线+山体阴影+DEM高程渲染层
         osm_points_layer = maker.load_vector_layer(maker.EXTENT_OSM_POINTS, maker.EXTENT_OSM_POINTS_LAYER_NAME,maker.DEFAULT_TEMPLATE[maker.EXTENT_OSM_POINTS_LAYER_NAME])

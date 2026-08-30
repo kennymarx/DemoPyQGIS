@@ -3,3 +3,5 @@
 bak/
 output/
 dem_files/
+osm_files/
+__pycache__/
