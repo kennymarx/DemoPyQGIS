@@ -131,6 +131,7 @@ class DemMakeQGISHeadless:
         self.EXTENT_DEM_HILLSHADOW_EXAG_Z_FACTOR = 5
         self.EXTENT_DEM_HILLSHADOW_EXAG_AZIMUTH = 90
         self.EXTENT_DEM_HILLSHADOW_EXAG_ALTITUDE = 30
+        self.Z_FACTOR_LEN = "111120"
 
         # 等值线图层
         self.CONTOUR_FILE = os.path.join(self.project_path, "extent_contour.gpkg")
@@ -1989,7 +1990,7 @@ class DemMakeQGISHeadless:
         if crs.authid() == "EPSG:4326":
             print("DEM文件坐标系为4326，需要添加 -s参数")
             command.append("-s")
-            command.append("111120")
+            command.append(self.Z_FACTOR_LEN)
         
         try:
             result = subprocess.run(
@@ -2596,7 +2597,7 @@ def point_to_map(center_lon, center_lat, north_south_length, east_west_length, p
         extent_dem_hillshade_file = maker.generate_hillshade(dem_file=extent_dem_resampled_file)
 
         # 生成夸张的阴影图层
-        extent_dem_hillshade_extreme_file = maker.generate_hillshade(dem_file=extent_dem_resampled_file, hillshade_file=maker.EXTENT_DEM_HILLSHADOW_EXAG, z_factor=5)
+        extent_dem_hillshade_extreme_file = maker.generate_hillshade(dem_file=extent_dem_resampled_file, hillshade_file=maker.EXTENT_DEM_HILLSHADOW_EXAG, z_factor=6)
 
         # 生成轨迹图层
         if gpx_file_path:
@@ -2726,7 +2727,10 @@ def point_to_map(center_lon, center_lat, north_south_length, east_west_length, p
 
         # OSM地图+等高线+山体阴影+DEM高程渲染层
         dem_layer = maker.load_raster_layer(maker.EXTENT_DEM_RENDER_LAYER, maker.EXTENT_DEM_RENDER_LAYER_NAME,maker.DEFAULT_TEMPLATE[maker.EXTENT_DEM_RENDER_LAYER_NAME])
-        dem_hillshade_layer = maker.load_raster_layer(maker.EXTENT_DEM_HILLSHADOW, maker.EXTENT_DEM_HILLSHADOW_LAYER_NAME,maker.DEFAULT_TEMPLATE[maker.EXTENT_DEM_HILLSHADOW_LAYER_NAME])
+        # 山体阴影图层
+        #dem_hillshade_layer = maker.load_raster_layer(maker.EXTENT_DEM_HILLSHADOW, maker.EXTENT_DEM_HILLSHADOW_LAYER_NAME,maker.DEFAULT_TEMPLATE[maker.EXTENT_DEM_HILLSHADOW_LAYER_NAME])
+        # 夸张的阴影图层
+        dem_hillshade_layer = maker.load_raster_layer(maker.EXTENT_DEM_HILLSHADOW_EXAG, maker.EXTENT_DEM_HILLSHADOW_EXAG_LAYER_NAME,maker.DEFAULT_TEMPLATE[maker.EXTENT_DEM_HILLSHADOW_EXAG_LAYER_NAME])
         maker.export_map_by_layout_templet(layers_to_show=[contour_layer,
             route_layer,
             osm_points_layer,osm_lines_layer,osm_multipolygons_layer,
@@ -2926,10 +2930,17 @@ if __name__ == "__main__":
     # point_to_map(center_lon=113.428453, center_lat=23.191103, north_south_length=15, east_west_length=10, 
     #     project_dir=r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto01", 
     #     gpx_file_path=r"C:\Users\Administrator\Desktop\QGIS\地图制作\火帽北山\2024-03-03 07 57 火北帽.gpx")
-
+    r'''
     point_to_map(center_lon=113.375531, center_lat=23.243997, north_south_length=5.5, east_west_length=6.5, 
         project_dir=r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto2026082802",
         map_title="广州蓝天救援协会大源杓麻训练地图1",
+        map_maker="1121-奀奀的排骨"
+        )
+    '''
+    # 23.23448,113.55742
+    point_to_map(center_lon=113.55742, center_lat=23.23448, north_south_length=6, east_west_length=7, 
+        project_dir=r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto2026082803",
+        map_title="广州蓝天救援协会训练地图",
         map_maker="1121-奀奀的排骨"
         )
 
