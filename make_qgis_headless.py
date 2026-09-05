@@ -174,8 +174,11 @@ class DemMakeQGISHeadless:
         self.PROJECT_SCALE_PARM = 1.0
         self.BG_SATELLITE_Y = 1
         self.BG_SATELLITE_N = 0
+        self.ICON_CLR = "default"
+        self.ICON_CLR_orange = "橙"
         self.SYS_PARAMS_MAP_TITLE = "map_title"
         self.SYS_PARAMS_MAP_MAKER = "map_maker"
+        self.SYS_PARAMS_ICON_CLR = "icon_clr"
         
 
         os.makedirs(self.project_path, exist_ok=True)
@@ -2197,13 +2200,14 @@ class DemMakeQGISHeadless:
         return True
 
     def export_map_by_layout_templet(self,layers_to_show=[],
-        map_title="广州蓝天救援协会龙腾牛奔训练地图",
+        map_title="广州蓝天训练用途",
         map_maker="1121-奀奀的排骨",
         bg_satellite=None,
         blank_pct=None,
         border=None,
         longest_side=None,
-        project_scale_parm=None
+        project_scale_parm=None,
+        icon_clr=None
         ):
         """
         打印地图
@@ -2232,6 +2236,8 @@ class DemMakeQGISHeadless:
             longest_side = self.LONGEST_SIDE
         if project_scale_parm is None:
             project_scale_parm = self.PROJECT_SCALE_PARM
+        if icon_clr is None:
+            icon_clr = self.ICON_CLR
             
         from qgis.core import (
             QgsProject,
@@ -2282,6 +2288,14 @@ class DemMakeQGISHeadless:
         QgsExpressionContextUtils.setProjectVariable(project_print, self.SYS_PARAMS_LONGEST_SIDE, longest_side)
         QgsExpressionContextUtils.setProjectVariable(project_print, self.SYS_PARAMS_PROJECT_SCALE_PARM, project_scale_parm)
         QgsExpressionContextUtils.setProjectVariable(project_print, self.SYS_PARAMS_BLANK_PCT, blank_pct)
+        QgsExpressionContextUtils.setProjectVariable(project_print, self.SYS_PARAMS_MAP_TITLE, map_title)
+        QgsExpressionContextUtils.setProjectVariable(project_print, self.SYS_PARAMS_MAP_MAKER, map_maker)
+        if bg_satellite == self.BG_SATELLITE_Y:
+            QgsExpressionContextUtils.setProjectVariable(project_print, self.SYS_PARAMS_ICON_CLR, self.ICON_CLR_orange)
+        else:
+            QgsExpressionContextUtils.setProjectVariable(project_print, self.SYS_PARAMS_ICON_CLR, self.ICON_CLR)
+
+
 
         if not os.path.exists(self.QPT_PATH):
             print(f"[错误] 找不到布局模板：{self.QPT_PATH}")
@@ -2324,6 +2338,10 @@ class DemMakeQGISHeadless:
         QgsExpressionContextUtils.setLayoutVariable(layout, self.SYS_PARAMS_BLANK_PCT, blank_pct)
         QgsExpressionContextUtils.setLayoutVariable(layout, self.SYS_PARAMS_MAP_TITLE, map_title)
         QgsExpressionContextUtils.setLayoutVariable(layout, self.SYS_PARAMS_MAP_MAKER, map_maker)
+        if bg_satellite == self.BG_SATELLITE_Y:
+            QgsExpressionContextUtils.setLayoutVariable(layout, self.SYS_PARAMS_ICON_CLR, self.ICON_CLR_orange)
+        else:
+            QgsExpressionContextUtils.setLayoutVariable(layout, self.SYS_PARAMS_ICON_CLR, self.ICON_CLR)
 
         print(f"[OK] 布局变量已设置：Longest_side={self.LONGEST_SIDE}, Blank_pct={self.BLANK_PCT}, Border={self.BORDER}")
 
@@ -2518,7 +2536,7 @@ class DemMakeQGISHeadless:
             return None
 
 
-def point_to_map(center_lon, center_lat, north_south_length, east_west_length, project_dir,gpx_file_path=None):
+def point_to_map(center_lon, center_lat, north_south_length, east_west_length, project_dir,gpx_file_path=None,map_title="广州蓝天训练用途",map_maker="1121-奀奀的排骨"):
     """
     执行完整的地图制作工作流
     
@@ -2685,7 +2703,11 @@ def point_to_map(center_lon, center_lat, north_south_length, east_west_length, p
 
         # 导出地图验证 ===========================
         print("\n=== 开始导出地图验证 ===")
-        # 影像地图+等高线
+        # OSM地图+等高线+影像地图
+        osm_points_layer = maker.load_vector_layer(maker.EXTENT_OSM_POINTS, maker.EXTENT_OSM_POINTS_LAYER_NAME,maker.DEFAULT_TEMPLATE[maker.EXTENT_OSM_POINTS_LAYER_NAME])
+        osm_lines_layer = maker.load_vector_layer(maker.EXTENT_OSM_LINES, maker.EXTENT_OSM_LINES_LAYER_NAME,maker.DEFAULT_TEMPLATE[maker.EXTENT_OSM_LINES_LAYER_NAME])
+        osm_multipolygons_layer = maker.load_vector_layer(maker.EXTENT_OSM_MULTIPOLYGONS, maker.EXTENT_OSM_MULTIPOLYGONS_LAYER_NAME,maker.DEFAULT_TEMPLATE[maker.EXTENT_OSM_MULTIPOLYGONS_LAYER_NAME])
+
         if gpx_file_path and os.path.exists(gpx_file_path):
             route_layer = maker.load_vector_layer(maker.EXTENT_ROUTE_LAYER, maker.EXTENT_ROUTE_LAYER_NAME,maker.DEFAULT_TEMPLATE[maker.EXTENT_ROUTE_LAYER_NAME])
         else:
@@ -2693,19 +2715,25 @@ def point_to_map(center_lon, center_lat, north_south_length, east_west_length, p
 
         tdt_layer = maker.load_raster_layer(maker.GOOGLE_MAP, maker.GOOGLE_MAP_LAYER_NAME,maker.DEFAULT_TEMPLATE[maker.GOOGLE_MAP_LAYER_NAME])
         contour_layer = maker.load_vector_layer(maker.CONTOUR_FILE, maker.CONTOUR_LAYER_NAME,maker.DEFAULT_TEMPLATE[maker.CONTOUR_LAYER_NAME])
-        maker.export_map_by_layout_templet(layers_to_show=[contour_layer,route_layer,tdt_layer],bg_satellite=maker.BG_SATELLITE_Y)
+        maker.export_map_by_layout_templet(layers_to_show=[contour_layer,
+            route_layer,
+            osm_points_layer,osm_lines_layer,osm_multipolygons_layer,
+            tdt_layer],
+            bg_satellite=maker.BG_SATELLITE_Y,
+            map_title=map_title,
+            map_maker=map_maker
+            )
 
         # OSM地图+等高线+山体阴影+DEM高程渲染层
-        osm_points_layer = maker.load_vector_layer(maker.EXTENT_OSM_POINTS, maker.EXTENT_OSM_POINTS_LAYER_NAME,maker.DEFAULT_TEMPLATE[maker.EXTENT_OSM_POINTS_LAYER_NAME])
-        osm_lines_layer = maker.load_vector_layer(maker.EXTENT_OSM_LINES, maker.EXTENT_OSM_LINES_LAYER_NAME,maker.DEFAULT_TEMPLATE[maker.EXTENT_OSM_LINES_LAYER_NAME])
-        osm_multipolygons_layer = maker.load_vector_layer(maker.EXTENT_OSM_MULTIPOLYGONS, maker.EXTENT_OSM_MULTIPOLYGONS_LAYER_NAME,maker.DEFAULT_TEMPLATE[maker.EXTENT_OSM_MULTIPOLYGONS_LAYER_NAME])
-
         dem_layer = maker.load_raster_layer(maker.EXTENT_DEM_RENDER_LAYER, maker.EXTENT_DEM_RENDER_LAYER_NAME,maker.DEFAULT_TEMPLATE[maker.EXTENT_DEM_RENDER_LAYER_NAME])
         dem_hillshade_layer = maker.load_raster_layer(maker.EXTENT_DEM_HILLSHADOW, maker.EXTENT_DEM_HILLSHADOW_LAYER_NAME,maker.DEFAULT_TEMPLATE[maker.EXTENT_DEM_HILLSHADOW_LAYER_NAME])
         maker.export_map_by_layout_templet(layers_to_show=[contour_layer,
             route_layer,
             osm_points_layer,osm_lines_layer,osm_multipolygons_layer,
-            dem_hillshade_layer,dem_layer])
+            dem_hillshade_layer,dem_layer],
+            map_title=map_title,
+            map_maker=map_maker
+            )
 
         # 待操作 - OSM地图（定制样式）+等高线+山体阴影+地图范围样式（底色）
 
@@ -2900,7 +2928,10 @@ if __name__ == "__main__":
     #     gpx_file_path=r"C:\Users\Administrator\Desktop\QGIS\地图制作\火帽北山\2024-03-03 07 57 火北帽.gpx")
 
     point_to_map(center_lon=113.375531, center_lat=23.243997, north_south_length=5.5, east_west_length=6.5, 
-        project_dir=r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto2026082803")
+        project_dir=r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto2026082802",
+        map_title="广州蓝天救援协会大源杓麻训练地图1",
+        map_maker="1121-奀奀的排骨"
+        )
 
     # gpx_to_map(r"C:\Users\Administrator\Desktop\QGIS\地图制作\火帽北山\2024-03-03 07 57 火北帽.gpx", 
     #   r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto02")
