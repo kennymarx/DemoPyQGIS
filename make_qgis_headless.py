@@ -3,6 +3,7 @@ import os
 import sys
 import shutil
 import time
+import tempfile
 import random
 import requests
 import subprocess
@@ -507,7 +508,7 @@ class DemMakeQGISHeadless:
         return (lat_deg, lon_deg)
     # 下载天地图瓦片（多线程并行版，与 _download_google_tiles 同一套设计）
     def _download_tianditu_tiles(self, lon_min, lon_max, lat_min, lat_max, zoom_level=14,
-                                 max_workers=16, max_retries=3):
+                                 max_workers=4, max_retries=3):
         """
         并行下载 天地图 卫星瓦片。
 
@@ -1029,6 +1030,34 @@ class DemMakeQGISHeadless:
         print("本地OSM资源均不包含地图范围，无法使用")
         return None
 
+    def _get_ascii_temp_dir(self):
+        """
+        返回一个纯 ASCII 路径且可写的临时目录，供 pyosmium 读写子集使用。
+
+        pyosmium(libosmium) 在 Windows 上经窄字符 API 打开文件，路径含中文等
+        非 ASCII 字符时会直接报 "The system cannot find the file specified"
+        （即使目录真实存在）。优先使用系统临时目录（通常为纯英文，如
+        C:\\Users\\Administrator\\AppData\\Local\\Temp）；若系统临时目录本身
+        含非 ASCII（如中文用户名 C:\\Users\\张三\\...），则回退到脚本旁的
+        osm_files/ 目录（脚本能在此运行说明其路径为 ASCII）。找不到时返回 None。
+        """
+        candidates = [tempfile.gettempdir()]
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        if script_dir.isascii():
+            osm_files_dir = os.path.join(script_dir, 'osm_files')
+            try:
+                os.makedirs(osm_files_dir, exist_ok=True)
+                candidates.append(osm_files_dir)
+            except OSError:
+                pass
+        for d in candidates:
+            try:
+                if d.isascii() and os.path.isdir(d) and os.access(d, os.W_OK):
+                    return d
+            except Exception:
+                continue
+        return None
+
     # 用 pyosmium 按地图范围从本地 OSM 数据提取子集（避免对全国级大文件做全量转换）
     def _extract_osm_subset(self, local_osm_path, extent):
         """
@@ -1059,6 +1088,18 @@ class DemMakeQGISHeadless:
         if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
             print(f"OSM子集已存在，直接使用: {out_path}")
             return out_path
+
+        # Windows 上 pyosmium(libosmium) 只能打开纯 ASCII 路径：项目目录含中文时
+        # SimpleWriter 直接写 out_path 会报 "The system cannot find the file specified"。
+        # 因此子集先写到 ASCII 临时目录，writer 关闭后再用 shutil.move 移入项目目录
+        # （shutil 走系统宽字符 API，中文路径正常；同盘移动为重命名，瞬时完成）。
+        tmp_dir = self._get_ascii_temp_dir()
+        if tmp_dir is None:
+            print("警告: 未找到可用的 ASCII 临时目录，跳过子集提取")
+            return None
+        fd, tmp_path = tempfile.mkstemp(suffix='.osm.pbf', dir=tmp_dir)
+        os.close(fd)
+        os.remove(tmp_path)  # mkstemp 会预建空文件，交由 SimpleWriter 自行创建
 
         # bbox 顺序：西,南,东,北
         west = extent['lon_min']
@@ -1113,7 +1154,9 @@ class DemMakeQGISHeadless:
                   f"用时 {time.time() - start_time:.0f} 秒")
 
             # ---- 第二遍：按 node -> way -> relation 的规范顺序写出子集 ----
-            writer = osmium.SimpleWriter(out_path)
+            # 先写到 ASCII 临时路径（pyosmium 无法直接写含中文的项目目录）
+            print(f"写入临时文件 {tmp_path} ...")
+            writer = osmium.SimpleWriter(tmp_path)
 
             class WriteHandler(osmium.SimpleHandler):
                 def node(self, n):
@@ -1131,17 +1174,22 @@ class DemMakeQGISHeadless:
             WriteHandler().apply_file(local_osm_path, locations=False)
             writer.close()
 
+            # 子集在 ASCII 临时路径写好后，再移动到（可能含中文的）项目目录
+            print(f"移动临时文件 {tmp_path} 到项目目录 {out_path} ...")
+            shutil.move(tmp_path, out_path)
+
             size_mb = os.path.getsize(out_path) / (1024 * 1024)
             print(f"OSM子集提取完成: {out_path} ({size_mb:.1f} MB), "
                   f"总用时 {time.time() - start_time:.0f} 秒")
             return out_path
         except Exception as e:
-            # 清理可能不完整的输出文件，避免下次误判为已缓存
-            if os.path.exists(out_path):
-                try:
-                    os.remove(out_path)
-                except OSError:
-                    pass
+            # 清理可能不完整的临时文件与输出文件，避免下次误判为已缓存
+            for p in (tmp_path, out_path):
+                if os.path.exists(p):
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
             print(f"OSM子集提取失败: {e}")
             return None
 
@@ -1232,6 +1280,8 @@ class DemMakeQGISHeadless:
         # 网络预检：逐个测试服务器，测通的第一个直接用于下载（下载时不再重新尝试其他服务器）
         print("\n[预检] 正在测试 Overpass(OSM) 服务器连通性...")
         server = self._check_osm_network()
+        # 测试：强制使用本地回退，跳过网络下载
+        #server = None
         if server is None:
             print("=" * 60)
             print("!!! 网络报警: 所有 Overpass(OSM) 服务器均无法连接，请检查网络/代理 !!!")
@@ -2930,20 +2980,21 @@ if __name__ == "__main__":
     # point_to_map(center_lon=113.428453, center_lat=23.191103, north_south_length=15, east_west_length=10, 
     #     project_dir=r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto01", 
     #     gpx_file_path=r"C:\Users\Administrator\Desktop\QGIS\地图制作\火帽北山\2024-03-03 07 57 火北帽.gpx")
-    r'''
+    r''''''
     point_to_map(center_lon=113.375531, center_lat=23.243997, north_south_length=5.5, east_west_length=6.5, 
         project_dir=r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto2026082802",
-        map_title="广州蓝天救援协会大源杓麻训练地图1",
+        map_title="广州蓝天救援协会大源杓麻训练地图",
         map_maker="1121-奀奀的排骨"
         )
-    '''
+    
+    r'''
     # 23.23448,113.55742
     point_to_map(center_lon=113.55742, center_lat=23.23448, north_south_length=6, east_west_length=7, 
         project_dir=r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto2026082803",
         map_title="广州蓝天救援协会训练地图",
         map_maker="1121-奀奀的排骨"
         )
-
+    '''
     # gpx_to_map(r"C:\Users\Administrator\Desktop\QGIS\地图制作\火帽北山\2024-03-03 07 57 火北帽.gpx", 
     #   r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto02")
 
