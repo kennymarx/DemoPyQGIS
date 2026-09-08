@@ -1,5 +1,8 @@
 import os
+import ssl
 import subprocess
+import sys
+import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -7,10 +10,10 @@ from osgeo import ogr, gdal
 
 # ============ 配置区 ============
 # 输入OSM PBF文件路径
-osm_pbf_file = r'C:\Users\Administrator\Documents\trae_projects\webframetest\DemoPyQGIS\osm_files\guangdong-260828.osm.pbf'
+osm_pbf_file = r'C:\Github\skills\DemoPyQGIS\osm_files\guangdong-260828.osm.pbf'
 
 # 输出目录
-output_dir = r'C:\Users\Administrator\Documents\trae_projects\webframetest\DemoPyQGIS\osm_files\guangdong_cities'
+output_dir = r'C:\Github\skills\DemoPyQGIS\osm_files\guangdong_cities'
 
 # 广东省边界GeoJSON文件路径（自动从DataV下载）
 # DataV.GeoAtlas 接口: https://geo.datav.aliyun.com/areas_v3/bound/{adcode}_full.json
@@ -58,9 +61,12 @@ def download_boundary_file(url, output_path):
     """
     print(f"正在从DataV下载广东省边界数据...")
     print(f"URL: {url}")
+
+    # 方式1: urllib + SSL context
     try:
+        ctx = ssl.create_default_context()
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=60) as response:
+        with urllib.request.urlopen(req, timeout=60, context=ctx) as response:
             data = response.read()
         with open(output_path, 'wb') as f:
             f.write(data)
@@ -68,8 +74,28 @@ def download_boundary_file(url, output_path):
         print(f"下载成功: {output_path} ({file_size:.2f} KB)")
         return True
     except Exception as e:
-        print(f"下载失败: {e}")
-        return False
+        print(f"urllib下载失败: {e}")
+
+    # 方式2: curl 回退（Windows 自带或 Git for Windows 附带）
+    try:
+        print("尝试使用 curl 下载...")
+        result = subprocess.run(
+            ['curl.exe', '-sL', '-o', output_path,
+             '-H', 'User-Agent: Mozilla/5.0', url],
+            capture_output=True, text=True, timeout=60
+        )
+        if result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            file_size = os.path.getsize(output_path) / 1024
+            print(f"下载成功(curl): {output_path} ({file_size:.2f} KB)")
+            return True
+        else:
+            print(f"curl下载失败: returncode={result.returncode}, stderr={result.stderr[:200]}")
+    except FileNotFoundError:
+        print("curl 不可用")
+    except Exception as e:
+        print(f"curl下载失败: {e}")
+
+    return False
 
 
 def _extract_polygons(geom):
@@ -195,6 +221,7 @@ def fix_boundary_geometry(input_path, output_path):
 def split_osm_by_city(osm_pbf, city_boundary, city_field, city_name, output_path):
     """
     使用ogr2ogr将OSM PBF按照地级市边界进行裁剪，输出GPKG文件
+    （OGR的OSM驱动只读不支持写出，先裁剪为GPKG再由gpkg_to_osm转换为OSM）
 
     参数:
         osm_pbf: 输入OSM PBF文件路径
@@ -211,7 +238,7 @@ def split_osm_by_city(osm_pbf, city_boundary, city_field, city_name, output_path
         os.remove(output_path)
         print(f"  已删除旧文件: {output_path}")
 
-    # 一次传入全部图层，PBF只解析一遍；不指定 -nln 时输出图层名沿用源图层名
+    # 一次传入全部图层，PBF只解析一遍；输出为GPKG格式
     cmd = [
         'ogr2ogr',
         '-f', 'GPKG',
@@ -227,6 +254,30 @@ def split_osm_by_city(osm_pbf, city_boundary, city_field, city_name, output_path
     except subprocess.CalledProcessError as e:
         err = e.stderr[:300] if e.stderr else str(e)
         print(f"  裁剪 {city_name} 失败: {err}")
+        return False
+
+
+def gpkg_to_osm(gpkg_path, osm_path):
+    """
+    使用ogr2osm将GPKG转换为OSM XML文件
+
+    参数:
+        gpkg_path: 输入GPKG文件路径
+        osm_path: 输出OSM文件路径
+
+    返回:
+        bool: 是否成功
+    """
+    if os.path.exists(osm_path):
+        os.remove(osm_path)
+
+    cmd = [sys.executable, '-m', 'ogr2osm', gpkg_path, '-o', osm_path]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        return True
+    except subprocess.CalledProcessError as e:
+        err = e.stderr[:300] if e.stderr else str(e)
+        print(f"  GPKG转OSM失败: {err}")
         return False
 
 
@@ -267,30 +318,39 @@ if __name__ == '__main__':
 
     success_cities = []
     failed_cities = []
+    city_times = {}
 
-    # 准备任务列表（输出文件名去掉'市'字简化）
-    tasks = [
+    # 阶段1：并行裁剪 PBF → GPKG
+    gpkg_tasks = [
         (city, os.path.join(output_dir, f'{city.replace("市", "")}.gpkg'))
         for city in guangdong_cities
     ]
 
-    print(f"\n开始并行拆分（{max_workers} 个并发进程）...")
+    def timed_split(city, output_file):
+        """记录单个城市裁剪耗时"""
+        start = time.perf_counter()
+        result = split_osm_by_city(
+            osm_pbf=osm_pbf_file,
+            city_boundary=clip_boundary,
+            city_field=city_name_field,
+            city_name=city,
+            output_path=output_file
+        )
+        city_times[city] = time.perf_counter() - start
+        return result
+
+    print(f"\n阶段1: 并行裁剪 PBF → GPKG（{max_workers} 个并发进程）...")
+    total_start = time.perf_counter()
+    gpkg_ok = {}  # city -> gpkg_path
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_map = {
-            executor.submit(
-                split_osm_by_city,
-                osm_pbf=osm_pbf_file,
-                city_boundary=clip_boundary,
-                city_field=city_name_field,
-                city_name=city,
-                output_path=output_file
-            ): (city, output_file)
-            for city, output_file in tasks
+            executor.submit(timed_split, city, gpkg_path): (city, gpkg_path)
+            for city, gpkg_path in gpkg_tasks
         }
 
         done_count = 0
         for future in as_completed(future_map):
-            city, output_file = future_map[future]
+            city, gpkg_path = future_map[future]
             done_count += 1
             try:
                 result = future.result()
@@ -298,18 +358,89 @@ if __name__ == '__main__':
                 print(f"  任务异常: {city}: {e}")
                 result = False
 
+            elapsed = city_times.get(city, 0)
             if result:
-                success_cities.append(city)
-                file_size = os.path.getsize(output_file) / (1024 * 1024)
-                print(f"[{done_count}/{len(tasks)}] {city} 完成 ({file_size:.2f} MB)")
+                gpkg_ok[city] = gpkg_path
+                file_size = os.path.getsize(gpkg_path) / (1024 * 1024)
+                print(f"[{done_count}/{len(gpkg_tasks)}] {city} 裁剪完成 ({file_size:.2f} MB, 耗时 {elapsed:.1f} 秒)")
             else:
                 failed_cities.append(city)
-                print(f"[{done_count}/{len(tasks)}] {city} 失败")
+                print(f"[{done_count}/{len(gpkg_tasks)}] {city} 裁剪失败 (耗时 {elapsed:.1f} 秒)")
+
+    gpkg_elapsed = time.perf_counter() - total_start
+
+    # 阶段2：串行转换 GPKG → OSM（ogr2osm 不保证线程安全）
+    print(f"\n阶段2: 转换 GPKG → OSM（串行）...")
+    osm_start = time.perf_counter()
+    osm_times = {}
+    osm_ok = []
+
+    # 确认 ogr2osm 可用
+    osm_tools_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '_tools')
+    if os.path.isdir(osm_tools_dir) and osm_tools_dir not in sys.path:
+        sys.path.insert(0, osm_tools_dir)
+
+    for i, (city, gpkg_path) in enumerate(gpkg_ok.items(), 1):
+        osm_path = os.path.join(output_dir, f'{city.replace("市", "")}.osm')
+        t0 = time.perf_counter()
+        ok = gpkg_to_osm(gpkg_path, osm_path)
+        elapsed = time.perf_counter() - t0
+        osm_times[city] = elapsed
+        if ok:
+            osm_ok.append(city)
+            file_size = os.path.getsize(osm_path) / (1024 * 1024)
+            print(f"[{i}/{len(gpkg_ok)}] {city} OSM转换完成 ({file_size:.2f} MB, 耗时 {elapsed:.1f} 秒)")
+        else:
+            failed_cities.append(city)
+            print(f"[{i}/{len(gpkg_ok)}] {city} OSM转换失败 (耗时 {elapsed:.1f} 秒)")
+
+    osm_elapsed = time.perf_counter() - osm_start
+    total_elapsed = time.perf_counter() - total_start
+    finish_time = time.strftime('%Y-%m-%d %H:%M:%S')
+
+    success_cities = osm_ok
+
+    # 合并耗时统计
+    all_times = {}
+    for city in guangdong_cities:
+        t = city_times.get(city, 0)
+        if city in osm_times:
+            t += osm_times[city]
+        all_times[city] = t
+
+    print("\n" + "-" * 70)
+    print(f"{'城市':<6} {'状态':<4} {'GPKG(MB)':>9} {'OSM(MB)':>9} {'裁剪(s)':>8} {'转换(s)':>8} {'合计(s)':>8}")
+    print("-" * 70)
+    for city, elapsed in sorted(all_times.items(), key=lambda x: x[1], reverse=True):
+        clip_t = city_times.get(city, 0)
+        osm_t = osm_times.get(city, 0)
+        status = '成功' if city in success_cities else '失败'
+        gpkg_mb = osm_mb = 0.0
+        gpkg_f = os.path.join(output_dir, f'{city.replace("市", "")}.gpkg')
+        osm_f = os.path.join(output_dir, f'{city.replace("市", "")}.osm')
+        if os.path.exists(gpkg_f):
+            gpkg_mb = os.path.getsize(gpkg_f) / (1024 * 1024)
+        if os.path.exists(osm_f):
+            osm_mb = os.path.getsize(osm_f) / (1024 * 1024)
+        print(f"{city:<6} {status:<4} {gpkg_mb:>9.2f} {osm_mb:>9.2f} {clip_t:>8.1f} {osm_t:>8.1f} {elapsed:>8.1f}")
+    print("-" * 70)
+    print(f"阶段1 裁剪总耗时: {gpkg_elapsed:.1f} 秒 ({gpkg_elapsed / 60:.1f} 分钟)")
+    print(f"阶段2 转换总耗时: {osm_elapsed:.1f} 秒 ({osm_elapsed / 60:.1f} 分钟)")
 
     print("\n" + "=" * 60)
     print("拆分完成！")
+    print(f"完成时间: {finish_time}")
     print(f"成功: {len(success_cities)} 个城市")
     print(f"失败: {len(failed_cities)} 个城市")
     if failed_cities:
         print(f"失败城市: {', '.join(failed_cities)}")
+    print(f"总耗时: {total_elapsed:.1f} 秒 ({total_elapsed / 60:.1f} 分钟)")
+
+    # 汇总文件大小
+    total_gpkg = sum(os.path.getsize(os.path.join(output_dir, f'{c.replace("市", "")}.gpkg'))
+                     for c in success_cities if os.path.exists(os.path.join(output_dir, f'{c.replace("市", "")}.gpkg')))
+    total_osm = sum(os.path.getsize(os.path.join(output_dir, f'{c.replace("市", "")}.osm'))
+                    for c in success_cities if os.path.exists(os.path.join(output_dir, f'{c.replace("市", "")}.osm')))
+    print(f"GPKG 总大小: {total_gpkg / (1024 * 1024):.2f} MB ({total_gpkg / (1024 ** 3):.2f} GB)")
+    print(f"OSM  总大小: {total_osm / (1024 * 1024):.2f} MB ({total_osm / (1024 ** 3):.2f} GB)")
     print("=" * 60)
