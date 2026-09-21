@@ -1895,7 +1895,7 @@ class DemMakeQGISHeadless:
             return None
 
     # 从DEM文件提取等高线
-    def generate_contour_from_dem(self, dem_file=None, contour_file=None):
+    def generate_contour_from_dem(self, dem_file=None, contour_file=None,interval=10.0):
         if os.path.exists(self.CONTOUR_FILE):
             print(f"警告: 等高线文件已存在: {self.CONTOUR_FILE}")
             print(f"跳过等高线提取，直接使用已存在文件: {self.CONTOUR_FILE}")
@@ -1931,7 +1931,7 @@ class DemMakeQGISHeadless:
             "gdal_contour",
             "-b", "1",
             "-a", "ELEV",
-            "-i", "10.0",
+            "-i", str(interval),
             "-f", "GPKG",
             dem_file,
             contour_file
@@ -2567,7 +2567,7 @@ def point_to_map(center_lon, center_lat, north_south_length, east_west_length,
         extent_dem_resampled_file = maker.generate_dem_resampled_by_gra_cubic(dem_file=extent_dem_file, resolution_m=10)
         
         # 生成等高线图层
-        extent_dem_contour_file = maker.generate_contour_from_dem(dem_file=extent_dem_resampled_file)
+        extent_dem_contour_file = maker.generate_contour_from_dem(dem_file=extent_dem_resampled_file,interval=20.0)
 
         # 生成高程渲染图层
         extent_dem_render_file = maker.make_dem_render_layer(dem_file=extent_dem_resampled_file)
@@ -2930,8 +2930,8 @@ if __name__ == "__main__":
         map_maker="1121-奀奀的排骨"
         )
     '''
-    gpx_to_map(r"C:\Users\Administrator\Desktop\QGIS\resource\20260918牛头山环线2.gpx",
-       r"C:\Users\Administrator\Desktop\QGIS\地图制作\广州蓝天牛头山巡山路线图2-牛头山环线",
-        map_title="广州蓝天牛头山巡山路线图2",
+    gpx_to_map(r"C:\Users\Administrator\Desktop\QGIS\resource\20260910牛木内线1.gpx", 
+       r"C:\Users\Administrator\Desktop\QGIS\地图制作\广州蓝天牛头山巡山路线图1-牛木内线",
+        map_title="广州蓝天牛头山巡山路线图1",
         map_maker="1121-奀奀的排骨")
 
