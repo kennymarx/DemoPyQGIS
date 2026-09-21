@@ -14,7 +14,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 from PyQt5.QtCore import QMetaType
 from shapely.validation import make_valid
-from shapely.geometry import Point
 from datetime import datetime
 import geopandas as gpd
 
@@ -2467,7 +2466,9 @@ class DemMakeQGISHeadless:
     # 创建轨迹图层
     def make_route_layer(self, gpx_file_path):
         """
-        根据GPX文件创建轨迹图层
+        从GPX的tracks中提取线路，并裁剪到地图范围后保存为GPKG。
+
+        GPX中的waypoints和routes会被忽略，只处理track/segment线路。
         
         参数:
         gpx_file_path (str): GPX文件路径
@@ -2479,107 +2480,34 @@ class DemMakeQGISHeadless:
         print(f"GPX文件路径: {gpx_file_path}")
         
         try:
-            # 1. 判断地图范围文件是否存在
-            if not os.path.exists(self.MAP_EXTENT_4326):
-                print(f"错误: 地图范围文件不存在: {self.MAP_EXTENT_4326}")
-                return None
-            
-            print(f"地图范围文件存在: {self.MAP_EXTENT_4326}")
-            
-            # 2. 判断GPX文件是否存在
             if not os.path.exists(gpx_file_path):
                 print(f"错误: GPX文件不存在: {gpx_file_path}")
                 return None
-            
-            # 3. 读取GPX文件，获取所有轨迹点
-            with open(gpx_file_path, 'r', encoding='utf-8') as f:
-                gpx = gpxpy.parse(f)
-            
-            all_points = []
-            for track in gpx.tracks:
-                for segment in track.segments:
-                    for point in segment.points:
-                        all_points.append((point.longitude, point.latitude))
-            
-            if not all_points:
-                print("错误: GPX文件中没有找到轨迹点")
+            if not os.path.exists(self.MAP_EXTENT_4326):
+                print(f"错误: 地图范围文件不存在: {self.MAP_EXTENT_4326}")
                 return None
-            
-            print(f"GPX文件中共有 {len(all_points)} 个轨迹点")
-            
-            # 4. 判断GPX轨迹是否在地图范围内
-            # 读取地图范围文件
-            extent_gdf = gpd.read_file(self.MAP_EXTENT_4326)
-            if extent_gdf.empty:
-                print("错误: 地图范围文件为空")
+
+            # 只读取GPX的tracks图层，忽略waypoints/routes；裁剪由独立ogr2ogr进程完成。
+            clip_layer_name = os.path.splitext(os.path.basename(self.MAP_EXTENT_4326))[0]
+            command = [
+                "ogr2ogr", "-f", "GPKG", "-overwrite",
+                "-nln", self.EXTENT_ROUTE_LAYER_NAME,
+                "-clipsrc", self.MAP_EXTENT_4326,
+                "-clipsrclayer", clip_layer_name,
+                self.EXTENT_ROUTE_LAYER, gpx_file_path, "tracks",
+            ]
+            try:
+                subprocess.run(command, check=True, capture_output=True, text=True)
+            except subprocess.CalledProcessError as error:
+                print(f"ogr2ogr轨迹裁剪失败: {error.stderr.strip()}")
                 return None
-            
-            extent_geometry = extent_gdf.geometry.iloc[0]
-            
-            # 检查是否有轨迹点在范围内
-            has_point_in_extent = False
-            for lon, lat in all_points:
-                point = Point(lon, lat)
-                if extent_geometry.contains(point) or extent_geometry.intersects(point):
-                    has_point_in_extent = True
-                    break
-            
-            if not has_point_in_extent:
-                print("错误: GPX轨迹不在地图范围内")
+
+            if not os.path.exists(self.EXTENT_ROUTE_LAYER) or os.path.getsize(self.EXTENT_ROUTE_LAYER) == 0:
+                print("错误: GPX线路与地图范围没有相交部分或输出文件为空")
                 return None
-            
-            print("GPX轨迹在地图范围内")
-            
-            # 5. 创建轨迹图层
-            from qgis.core import QgsVectorLayer, QgsField, QgsGeometry, QgsFeature, QgsVectorFileWriter
-            
-            temp_layer = QgsVectorLayer("LineString?crs=epsg:4326", "轨迹", "memory")
-            
-            if not temp_layer.isValid():
-                print("错误: 临时图层创建失败")
-                return None
-            
-            temp_layer.startEditing()
-            
-            temp_layer.dataProvider().addAttributes([
-                QgsField("id", QMetaType.Type.Int),
-                QgsField("name", QMetaType.Type.QString)
-            ])
-            temp_layer.updateFields()
-            
-            # 创建线要素
-            from qgis.core import QgsPointXY
-            
-            if len(all_points) >= 2:
-                qgis_points = [QgsPointXY(lon, lat) for lon, lat in all_points]
-                line_geometry = QgsGeometry.fromPolylineXY(qgis_points)
-                
-                feature = QgsFeature()
-                feature.setGeometry(line_geometry)
-                feature.setAttributes([1, "轨迹"])
-                temp_layer.dataProvider().addFeature(feature)
-            
-            temp_layer.updateExtents()
-            temp_layer.commitChanges()
-            
-            # 6. 保存为GPKG文件
-            output_gpkg = self.EXTENT_ROUTE_LAYER
-            
-            options = QgsVectorFileWriter.SaveVectorOptions()
-            options.driverName = "GPKG"
-            options.fileEncoding = "UTF-8"
-            transform_context = self.project.transformContext()
-            
-            QgsVectorFileWriter.writeAsVectorFormatV3(
-                temp_layer,
-                output_gpkg,
-                transform_context,
-                options
-            )
-            
-            print(f"轨迹图层已保存: {output_gpkg}")
-            return output_gpkg
-            
+
+            print(f"轨迹图层已保存: {self.EXTENT_ROUTE_LAYER}")
+            return self.EXTENT_ROUTE_LAYER
         except Exception as e:
             print(f"创建轨迹图层失败: {e}")
             import traceback
@@ -2627,7 +2555,7 @@ def point_to_map(center_lon, center_lat, north_south_length, east_west_length,
         map_extent_file = maker.make_map_extent_layer()
 
         # 生成天地图图层
-        extent_tianditu_file = maker.make_tianditu_layer(zoom_level=18)
+        # extent_tianditu_file = maker.make_tianditu_layer(zoom_level=18)
 
         # 生成谷歌地图图层
         extent_google_file = maker.make_google_layer(zoom_level=18)
@@ -2697,12 +2625,14 @@ def point_to_map(center_lon, center_lat, north_south_length, east_west_length,
             layer_style=maker.DEFAULT_TEMPLATE[maker.MAP_EXTENT_LAYER_NAME]
         )
 
+        r'''
         # 添加天地图图层
         maker.add_layer_to_project(
             layer_path=extent_tianditu_file,
             layer_name=maker.TIANDITU_MAP_LAYER_NAME,
             layer_style=maker.DEFAULT_TEMPLATE[maker.GOOGLE_MAP_LAYER_NAME]
         )
+        '''
         
         # 添加谷歌地图图层
         maker.add_layer_to_project(
@@ -3000,8 +2930,8 @@ if __name__ == "__main__":
         map_maker="1121-奀奀的排骨"
         )
     '''
-    gpx_to_map(r"C:\Users\Administrator\Desktop\QGIS\地图制作\火帽北山\2024-03-03 07 57 火北帽.gpx", 
-       r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto02",
-        map_title="广州蓝天救援协会大源杓麻训练地图",
+    gpx_to_map(r"C:\Users\Administrator\Desktop\QGIS\resource\20260918牛头山环线2.gpx",
+       r"C:\Users\Administrator\Desktop\QGIS\地图制作\广州蓝天牛头山巡山路线图2-牛头山环线",
+        map_title="广州蓝天牛头山巡山路线图2",
         map_maker="1121-奀奀的排骨")
 
