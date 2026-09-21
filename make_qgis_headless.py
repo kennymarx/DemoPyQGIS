@@ -2587,7 +2587,8 @@ class DemMakeQGISHeadless:
             return None
 
 
-def point_to_map(center_lon, center_lat, north_south_length, east_west_length, project_dir,gpx_file_path=None,map_title="广州蓝天训练用途",map_maker="1121-奀奀的排骨"):
+def point_to_map(center_lon, center_lat, north_south_length, east_west_length, 
+                 project_dir,gpx_file_path=None,map_title="广州蓝天训练用途",map_maker="1121-奀奀的排骨"):
     """
     执行完整的地图制作工作流
     
@@ -2653,6 +2654,7 @@ def point_to_map(center_lon, center_lat, north_south_length, east_west_length, p
         if gpx_file_path:
             print(f"生成轨迹图层: {gpx_file_path}")
             extent_route_file = maker.make_route_layer(gpx_file_path)
+            print(f"生成轨迹图层: {gpx_file_path} 结束")
 
         # OSM数据处理：相交产物(extent_osm_*.gpkg)已全部生成时，跳过下载/提取/相交（断点续传）
         extent_osm_files = maker._get_cached_extent_osm_files()
@@ -2813,7 +2815,8 @@ def haversine_distance(lon1, lat1, lon2, lat2):
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
     return R * c
 
-def gpx_to_map(gpx_file_path, project_dir):
+def gpx_to_map(gpx_file_path, project_dir,
+               map_title=None,map_maker=None):
     """
     根据GPX轨迹文件生成地图项目
     
@@ -2893,7 +2896,9 @@ def gpx_to_map(gpx_file_path, project_dir):
         
         # 8. 调用point_to_map生成地图
         print("\n=== 开始生成地图项目 ===")
-        success = point_to_map(center_lon, center_lat, north_south_length_km, east_west_length_km, project_dir, gpx_file_path)
+        success = point_to_map(center_lon, center_lat, north_south_length_km, east_west_length_km, 
+                               project_dir, gpx_file_path=gpx_file_path,
+                               map_title=map_title,map_maker=map_maker)
         
         if success:
             print(f"\n=== GPX轨迹地图生成完成 ===")
@@ -2980,13 +2985,13 @@ if __name__ == "__main__":
     # point_to_map(center_lon=113.428453, center_lat=23.191103, north_south_length=15, east_west_length=10, 
     #     project_dir=r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto01", 
     #     gpx_file_path=r"C:\Users\Administrator\Desktop\QGIS\地图制作\火帽北山\2024-03-03 07 57 火北帽.gpx")
-    r''''''
+    r'''
     point_to_map(center_lon=113.375531, center_lat=23.243997, north_south_length=5.5, east_west_length=6.5, 
-        project_dir=r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto2026082802",
+        project_dir=r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto2026082801",
         map_title="广州蓝天救援协会大源杓麻训练地图",
         map_maker="1121-奀奀的排骨"
         )
-    
+    '''
     r'''
     # 23.23448,113.55742
     point_to_map(center_lon=113.55742, center_lat=23.23448, north_south_length=6, east_west_length=7, 
@@ -2995,6 +3000,8 @@ if __name__ == "__main__":
         map_maker="1121-奀奀的排骨"
         )
     '''
-    # gpx_to_map(r"C:\Users\Administrator\Desktop\QGIS\地图制作\火帽北山\2024-03-03 07 57 火北帽.gpx", 
-    #   r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto02")
+    gpx_to_map(r"C:\Users\Administrator\Desktop\QGIS\地图制作\火帽北山\2024-03-03 07 57 火北帽.gpx", 
+       r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto02",
+        map_title="广州蓝天救援协会大源杓麻训练地图",
+        map_maker="1121-奀奀的排骨")
 
