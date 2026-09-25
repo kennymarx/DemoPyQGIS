@@ -84,6 +84,11 @@ class DemMakeQGISHeadless:
         self.GOOGLE_MAP_LAYER_NAME = "extent_google_map"
         self.GOOGLE_MAP_TEMP = os.path.join(self.project_path, 'extent_google_map_temp.tif')
 
+        # 高德地图影像（下载坐标为 GCJ-02，输出 GeoTIFF 为 WGS84）
+        self.GAODE_MAP = os.path.join(self.project_path, 'extent_gaode_map.tif')
+        self.GAODE_MAP_LAYER_NAME = "extent_gaode_map"
+        self.GAODE_MAP_TEMP = os.path.join(self.project_path, 'extent_gaode_map_temp.tif')
+
         # OSM数据图层
         self.MAP_OSM = os.path.join(self.project_path, 'map.osm')
 
@@ -152,6 +157,7 @@ class DemMakeQGISHeadless:
             self.EXTENT_DEM_HILLSHADOW_EXAG_LAYER_NAME:os.path.join(self.TEMPLATE_PATH, "山体阴影样式.qml"),
             self.EXTENT_ROUTE_LAYER_NAME:os.path.join(self.TEMPLATE_PATH, "轨迹图层样式.qml"),
             self.GOOGLE_MAP_LAYER_NAME:os.path.join(self.TEMPLATE_PATH, "谷歌卫图图层样式.qml"),
+            self.GAODE_MAP_LAYER_NAME:os.path.join(self.TEMPLATE_PATH, "高德地图图层样式.qml"),
         }
 
         # 打印模板
@@ -505,6 +511,56 @@ class DemMakeQGISHeadless:
         lat_rad = math.atan(math.sinh(math.pi * (1 - 2 * ytile / n)))
         lat_deg = math.degrees(lat_rad)
         return (lat_deg, lon_deg)
+
+    # WGS84 与高德瓦片使用的 GCJ-02 坐标转换
+    @staticmethod
+    def _out_of_china(lon, lat):
+        return not (72.004 <= lon <= 137.8347 and 0.8293 <= lat <= 55.8271)
+
+    @staticmethod
+    def _transform_lat(x, y):
+        ret = (-100.0 + 2.0 * x + 3.0 * y + 0.2 * y * y
+               + 0.1 * x * y + 0.2 * math.sqrt(abs(x)))
+        ret += (20.0 * math.sin(6.0 * x * math.pi)
+                + 20.0 * math.sin(2.0 * x * math.pi)) * 2.0 / 3.0
+        ret += (20.0 * math.sin(y * math.pi)
+                + 40.0 * math.sin(y / 3.0 * math.pi)) * 2.0 / 3.0
+        ret += (160.0 * math.sin(y / 12.0 * math.pi)
+                + 320 * math.sin(y * math.pi / 30.0)) * 2.0 / 3.0
+        return ret
+
+    @staticmethod
+    def _transform_lon(x, y):
+        ret = 300.0 + x + 2.0 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * math.sqrt(abs(x))
+        ret += (20.0 * math.sin(6.0 * x * math.pi)
+                + 20.0 * math.sin(2.0 * x * math.pi)) * 2.0 / 3.0
+        ret += (20.0 * math.sin(x * math.pi)
+                + 40.0 * math.sin(x / 3.0 * math.pi)) * 2.0 / 3.0
+        ret += (150.0 * math.sin(x / 12.0 * math.pi)
+                + 300.0 * math.sin(x / 30.0 * math.pi)) * 2.0 / 3.0
+        return ret
+
+    @classmethod
+    def _wgs84_to_gcj02(cls, lon, lat):
+        if cls._out_of_china(lon, lat):
+            return lon, lat
+        earth_a = 6378245.0
+        eccentricity = 0.00669342162296594323
+        d_lat = cls._transform_lat(lon - 105.0, lat - 35.0)
+        d_lon = cls._transform_lon(lon - 105.0, lat - 35.0)
+        rad_lat = lat / 180.0 * math.pi
+        magic = 1 - eccentricity * math.sin(rad_lat) ** 2
+        sqrt_magic = math.sqrt(magic)
+        d_lat = d_lat * 180.0 / (earth_a * (1 - eccentricity) / magic / sqrt_magic * math.pi)
+        d_lon = d_lon * 180.0 / (earth_a / sqrt_magic * math.cos(rad_lat) * math.pi)
+        return lon + d_lon, lat + d_lat
+
+    @classmethod
+    def _gcj02_to_wgs84(cls, lon, lat):
+        if cls._out_of_china(lon, lat):
+            return lon, lat
+        gcj_lon, gcj_lat = cls._wgs84_to_gcj02(lon, lat)
+        return lon * 2 - gcj_lon, lat * 2 - gcj_lat
     # 下载天地图瓦片（多线程并行版，与 _download_google_tiles 同一套设计）
     def _download_tianditu_tiles(self, lon_min, lon_max, lat_min, lat_max, zoom_level=14,
                                  max_workers=4, max_retries=3):
@@ -883,6 +939,166 @@ class DemMakeQGISHeadless:
             temp_jpg=self.GOOGLE_MAP_TEMP,
             tif_path=self.GOOGLE_MAP
         )
+
+    # 下载高德卫星瓦片：输入边界为 GCJ-02，输出 GeoTIFF 为 WGS84
+    def _download_gaode_tiles(self, lon_min, lon_max, lat_min, lat_max, zoom_level=14,
+                              max_workers=16, max_retries=3):
+        gaode_urls = [
+            'https://webst0{server}.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}',
+        ]
+        base_headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+        }
+
+        x_min, y_min = self._deg2num(lat_max, lon_min, zoom_level)
+        x_max, y_max = self._deg2num(lat_min, lon_max, zoom_level)
+        tile_output_dir = os.path.join(self.project_path, 'gaode_tiles')
+        os.makedirs(tile_output_dir, exist_ok=True)
+
+        tasks = []
+        for x in range(x_min, x_max + 1):
+            for y in range(y_min, y_max + 1):
+                filename = os.path.join(tile_output_dir, f'tile_{zoom_level}_{x}_{y}.jpg')
+                tasks.append((x, y, filename))
+
+        total_tiles = len(tasks)
+        existed = sum(1 for _, _, filename in tasks
+                      if os.path.exists(filename) and os.path.getsize(filename) > 0)
+        counter_lock = threading.Lock()
+        done = {'success': existed, 'fail': 0}
+        tls = threading.local()
+
+        def get_session():
+            if not hasattr(tls, 'session'):
+                tls.session = requests.Session()
+                tls.session.headers.update(base_headers.copy())
+            return tls.session
+
+        def download_one(x, y, filename):
+            if os.path.exists(filename) and os.path.getsize(filename) > 0:
+                return True
+            session = get_session()
+            last_error = None
+            for attempt in range(max_retries):
+                try:
+                    url = gaode_urls[0].format(
+                        server=random.randint(1, 4), x=x, y=y, z=zoom_level)
+                    response = session.get(url, timeout=(5, 15))
+                    if response.status_code != 200 or not response.content:
+                        last_error = f'HTTP {response.status_code}'
+                        if 400 <= response.status_code < 500:
+                            break
+                        time.sleep(2 ** attempt)
+                        continue
+                    with open(filename, 'wb', buffering=1024 * 1024) as file:
+                        file.write(response.content)
+                    return True
+                except Exception as error:
+                    last_error = str(error)
+                    time.sleep(2 ** attempt)
+            print(f'    高德瓦片下载失败 ({x},{y}): {last_error}')
+            return False
+
+        print(f'\n开始并行下载高德卫星瓦片 (级别: {zoom_level}, 线程: {max_workers})...')
+        print(f'瓦片列范围: {x_min} 到 {x_max}')
+        print(f'瓦片行范围: {y_min} 到 {y_max}')
+        print(f'总瓦片数: {total_tiles}，已存在跳过: {existed}，待下载: {total_tiles - existed}')
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_map = {
+                executor.submit(download_one, x, y, filename): (x, y)
+                for x, y, filename in tasks
+            }
+            for future in as_completed(future_map):
+                with counter_lock:
+                    if future.result():
+                        done['success'] += 1
+                    else:
+                        done['fail'] += 1
+                    progress = done['success'] + done['fail']
+                    if progress % 25 == 0 or progress == total_tiles:
+                        print(f'  进度: {progress}/{total_tiles}  成功 {done["success"]}  失败 {done["fail"]}')
+
+        if done['fail']:
+            raise RuntimeError(f'高德瓦片下载失败 {done["fail"]} 个，停止拼装')
+        return self._merge_gaode_tiles(
+            tile_output_dir, zoom_level, (x_min, x_max), (y_min, y_max),
+            temp_jpg=self.GAODE_MAP_TEMP, tif_path=self.GAODE_MAP)
+
+    def _merge_gaode_tiles(self, tile_output_dir, zoom, x_range, y_range,
+                           temp_jpg=None, tif_path=None):
+        from PIL import Image
+        from osgeo import gdal
+        from pyproj import Transformer
+
+        temp_jpg = temp_jpg or self.GAODE_MAP_TEMP
+        tif_path = tif_path or self.GAODE_MAP
+        tile_width = 256
+        tile_height = 256
+        merged = Image.new(
+            'RGB',
+            ((x_range[1] - x_range[0] + 1) * tile_width,
+             (y_range[1] - y_range[0] + 1) * tile_height))
+
+        for x in range(x_range[0], x_range[1] + 1):
+            for y in range(y_range[0], y_range[1] + 1):
+                tile_path = os.path.join(tile_output_dir, f'tile_{zoom}_{x}_{y}.jpg')
+                with Image.open(tile_path) as tile_image:
+                    merged.paste(tile_image.convert('RGB'),
+                                 ((x - x_range[0]) * tile_width,
+                                  (y - y_range[0]) * tile_height))
+        merged.save(temp_jpg)
+
+        top_lat_gcj, left_lon_gcj = self._num2deg(x_range[0], y_range[0], zoom)
+        bottom_lat_gcj, right_lon_gcj = self._num2deg(
+            x_range[1] + 1, y_range[1] + 1, zoom)
+        left_lon_wgs, top_lat_wgs = self._gcj02_to_wgs84(left_lon_gcj, top_lat_gcj)
+        right_lon_wgs, bottom_lat_wgs = self._gcj02_to_wgs84(right_lon_gcj, bottom_lat_gcj)
+
+        # 高德瓦片边界先从 GCJ-02 反算为 WGS84，再投影到 EPSG:3857。
+        transformer = Transformer.from_crs('EPSG:4326', 'EPSG:3857', always_xy=True)
+        left_x_3857, top_y_3857 = transformer.transform(left_lon_wgs, top_lat_wgs)
+        right_x_3857, bottom_y_3857 = transformer.transform(right_lon_wgs, bottom_lat_wgs)
+
+        gdal.UseExceptions()
+        gcps = [
+            gdal.GCP(left_x_3857, top_y_3857, 0, 0, 0),
+            gdal.GCP(right_x_3857, top_y_3857, 0, merged.width, 0),
+            gdal.GCP(left_x_3857, bottom_y_3857, 0, 0, merged.height),
+            gdal.GCP(right_x_3857, bottom_y_3857, 0, merged.width, merged.height),
+        ]
+        options = gdal.TranslateOptions(format='GTiff', outputSRS='EPSG:3857', GCPs=gcps)
+        gdal.Translate(tif_path, temp_jpg, options=options)
+        print(f'高德卫星影像 GeoTIFF（EPSG:3857 - WGS 84）保存至: {tif_path}')
+        return tif_path
+
+    def _check_gaode_network(self, timeout=5):
+        url = 'https://webst01.is.autonavi.com/appmaptile?style=6&x=0&y=0&z=1'
+        return self._check_network(url, timeout)
+
+    def make_gaode_layer(self, zoom_level=14):
+        """下载高德卫星影像，并将结果输出为 WGS84 GeoTIFF。"""
+        if os.path.exists(self.GAODE_MAP):
+            print(f'警告: 高德卫星影像已存在: {self.GAODE_MAP}')
+            return self.GAODE_MAP
+        if not os.path.exists(self.MAP_EXTENT_4326):
+            raise RuntimeError(f'{self.MAP_EXTENT_4326}不存在，请先创建')
+        if not self._check_gaode_network():
+            print('高德卫星瓦片服务器无法连接，跳过高德地图下载')
+            return None
+
+        extent = self._get_gpkg_extent()
+        wgs84_corners = [
+            (extent['lon_min'], extent['lat_min']),
+            (extent['lon_min'], extent['lat_max']),
+            (extent['lon_max'], extent['lat_min']),
+            (extent['lon_max'], extent['lat_max']),
+        ]
+        gcj02_corners = [self._wgs84_to_gcj02(lon, lat) for lon, lat in wgs84_corners]
+        gcj_lons = [lon for lon, _ in gcj02_corners]
+        gcj_lats = [lat for _, lat in gcj02_corners]
+        return self._download_gaode_tiles(
+            min(gcj_lons), max(gcj_lons), min(gcj_lats), max(gcj_lats), zoom_level)
 
     # 通用网络连通性检查
     def _check_network(self, url, timeout=5, headers=None):
@@ -1652,9 +1868,9 @@ class DemMakeQGISHeadless:
         """
         if extent_osm_files is None:
             extent_osm_files = {
-                'multipolygons': self.EXTENT_OSM_MULTIPOLYGONS,
-                'lines': self.EXTENT_OSM_LINES,
                 'points': self.EXTENT_OSM_POINTS,
+                'lines': self.EXTENT_OSM_LINES,
+                'multipolygons': self.EXTENT_OSM_MULTIPOLYGONS,                
             }
         
         if style_map is None:
@@ -2555,7 +2771,10 @@ def point_to_map(center_lon, center_lat, north_south_length, east_west_length,
         map_extent_file = maker.make_map_extent_layer()
 
         # 生成天地图图层
-        # extent_tianditu_file = maker.make_tianditu_layer(zoom_level=18)
+        extent_tianditu_file = maker.make_tianditu_layer(zoom_level=18)
+
+        # 生成高德地图图层
+        extent_gaode_file = maker.make_gaode_layer(zoom_level=18)
 
         # 生成谷歌地图图层
         extent_google_file = maker.make_google_layer(zoom_level=18)
@@ -2625,20 +2844,27 @@ def point_to_map(center_lon, center_lat, north_south_length, east_west_length,
             layer_style=maker.DEFAULT_TEMPLATE[maker.MAP_EXTENT_LAYER_NAME]
         )
 
-        r'''
+        r''''''
         # 添加天地图图层
         maker.add_layer_to_project(
             layer_path=extent_tianditu_file,
             layer_name=maker.TIANDITU_MAP_LAYER_NAME,
             layer_style=maker.DEFAULT_TEMPLATE[maker.GOOGLE_MAP_LAYER_NAME]
         )
-        '''
+        
         
         # 添加谷歌地图图层
         maker.add_layer_to_project(
             layer_path=extent_google_file,
             layer_name=maker.GOOGLE_MAP_LAYER_NAME,
             layer_style=maker.DEFAULT_TEMPLATE[maker.GOOGLE_MAP_LAYER_NAME]
+        )
+
+        # 添加高德地图图层
+        maker.add_layer_to_project(
+            layer_path=extent_gaode_file,
+            layer_name=maker.GAODE_MAP_LAYER_NAME,
+            #layer_style=maker.DEFAULT_TEMPLATE[maker.GAODE_MAP_LAYER_NAME]
         )
         
         # 添加等高线图层
@@ -2686,6 +2912,7 @@ def point_to_map(center_lon, center_lat, north_south_length, east_west_length,
 
         # 导出地图验证 ===========================
         print("\n=== 开始导出地图验证 ===")
+
         # OSM地图+等高线+影像地图
         osm_points_layer = maker.load_vector_layer(maker.EXTENT_OSM_POINTS, maker.EXTENT_OSM_POINTS_LAYER_NAME,maker.DEFAULT_TEMPLATE[maker.EXTENT_OSM_POINTS_LAYER_NAME])
         osm_lines_layer = maker.load_vector_layer(maker.EXTENT_OSM_LINES, maker.EXTENT_OSM_LINES_LAYER_NAME,maker.DEFAULT_TEMPLATE[maker.EXTENT_OSM_LINES_LAYER_NAME])
@@ -2696,8 +2923,16 @@ def point_to_map(center_lon, center_lat, north_south_length, east_west_length,
         else:
             route_layer = None
 
-        tdt_layer = maker.load_raster_layer(maker.GOOGLE_MAP, maker.GOOGLE_MAP_LAYER_NAME,maker.DEFAULT_TEMPLATE[maker.GOOGLE_MAP_LAYER_NAME])
         contour_layer = maker.load_vector_layer(maker.CONTOUR_FILE, maker.CONTOUR_LAYER_NAME,maker.DEFAULT_TEMPLATE[maker.CONTOUR_LAYER_NAME])
+
+        # 优先使用高德地图图层，如果不存在则使用谷歌地图图层，其他情况使用天地图。
+        if os.path.exists(maker.GAODE_MAP):
+            tdt_layer = maker.load_raster_layer(maker.GAODE_MAP, maker.GAODE_MAP_LAYER_NAME,maker.DEFAULT_TEMPLATE[maker.GAODE_MAP_LAYER_NAME])
+        elif os.path.exists(maker.GOOGLE_MAP):
+            tdt_layer = maker.load_raster_layer(maker.GOOGLE_MAP, maker.GOOGLE_MAP_LAYER_NAME,maker.DEFAULT_TEMPLATE[maker.GOOGLE_MAP_LAYER_NAME])
+        else:
+            tdt_layer = maker.load_raster_layer(maker.TDT_MAP, maker.TDT_MAP_LAYER_NAME,maker.DEFAULT_TEMPLATE[maker.TDT_MAP_LAYER_NAME])
+        
         maker.export_map_by_layout_templet(layers_to_show=[contour_layer,
             route_layer,
             osm_points_layer,osm_lines_layer,osm_multipolygons_layer,
@@ -2930,8 +3165,8 @@ if __name__ == "__main__":
         map_maker="1121-奀奀的排骨"
         )
     '''
-    gpx_to_map(r"C:\Users\Administrator\Desktop\QGIS\resource\20260910牛木内线1.gpx", 
-       r"C:\Users\Administrator\Desktop\QGIS\地图制作\广州蓝天牛头山巡山路线图1-牛木内线",
-        map_title="广州蓝天牛头山巡山路线图1",
+    gpx_to_map(r"C:\Users\Administrator\Desktop\QGIS\地图制作\新建文件夹\20260918牛头山∽乌石山环线整理-3.gpx", 
+       r"C:\Users\Administrator\Desktop\QGIS\地图制作\广州蓝天牛头山巡山路线图3-乌石山环线",
+        map_title="广州蓝天牛头山巡山路线图3",
         map_maker="1121-奀奀的排骨")
 
