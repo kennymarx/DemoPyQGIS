@@ -1496,7 +1496,7 @@ class DemMakeQGISHeadless:
         print("\n[预检] 正在测试 Overpass(OSM) 服务器连通性...")
         server = self._check_osm_network()
         # 测试：强制使用本地回退，跳过网络下载
-        #server = None
+        # server = None
         if server is None:
             print("=" * 60)
             print("!!! 网络报警: 所有 Overpass(OSM) 服务器均无法连接，请检查网络/代理 !!!")
@@ -2849,7 +2849,7 @@ def point_to_map(center_lon, center_lat, north_south_length, east_west_length,
         maker.add_layer_to_project(
             layer_path=extent_tianditu_file,
             layer_name=maker.TIANDITU_MAP_LAYER_NAME,
-            layer_style=maker.DEFAULT_TEMPLATE[maker.GOOGLE_MAP_LAYER_NAME]
+            #layer_style=maker.DEFAULT_TEMPLATE[maker.GOOGLE_MAP_LAYER_NAME]
         )
         
         
