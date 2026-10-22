@@ -1398,6 +1398,7 @@
        <Option name="type" value="3" type="int"/>
       </Option>
      </Option>
+     </Option>
    </row>
    <row>
     <Option type="Map">

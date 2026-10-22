@@ -141,6 +141,7 @@ class DemMakeQGISHeadless:
         # 等值线图层
         self.CONTOUR_FILE = os.path.join(self.project_path, "extent_contour.gpkg")
         self.CONTOUR_LAYER_NAME = "extent_contour"
+        self.CONTOUR_INTERVAL = 10.0
 
         # 模板文件
         self.TEMPLATE_PATH = os.path.join(self.RESOURCES_PATH, "template")
@@ -165,6 +166,8 @@ class DemMakeQGISHeadless:
         self.LAYOUT_MODEL_HORIZONTAL_NAME = "layoutmodel-横向"
         self.LAYOUT_MODEL_VERTICAL = os.path.join(self.PRINT_MODEL_PATH, "layoutmodel-纵向.qpt")
         self.LAYOUT_MODEL_VERTICAL_NAME = "layoutmodel-纵向"
+        self.LAYOUT_MODEL_NEW = os.path.join(self.PRINT_MODEL_PATH, "layoutmodel-new.qpt")
+        self.LAYOUT_MODEL_NEW_NAME = "layoutmodel-new"
 
         # 系统参数
         self.DPI = 300
@@ -2110,12 +2113,57 @@ class DemMakeQGISHeadless:
             print(f"DEM三次方重采样失败: {e}")
             return None
 
+    @staticmethod
+    def _sha256_file(file_path):
+        import hashlib
+
+        digest = hashlib.sha256()
+        with open(file_path, "rb") as source_file:
+            for chunk in iter(lambda: source_file.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    @staticmethod
+    def _read_contour_metadata(gpkg_path):
+        import sqlite3
+
+        try:
+            with sqlite3.connect(gpkg_path) as connection:
+                rows = connection.execute(
+                    "SELECT key, value FROM demmake_metadata"
+                ).fetchall()
+            return dict(rows)
+        except sqlite3.Error:
+            return None
+
+    @staticmethod
+    def _write_contour_metadata(gpkg_path, metadata):
+        import sqlite3
+
+        with sqlite3.connect(gpkg_path) as connection:
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS demmake_metadata ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "key TEXT NOT NULL UNIQUE, value TEXT NOT NULL)"
+            )
+            connection.executemany(
+                "INSERT OR REPLACE INTO demmake_metadata (key, value) VALUES (?, ?)",
+                metadata.items()
+            )
+            connection.execute(
+                "INSERT OR REPLACE INTO gpkg_contents "
+                "(table_name, data_type, identifier, description, last_change, srs_id) "
+                "VALUES (?, 'attributes', ?, ?, "
+                "strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), NULL)",
+                (
+                    "demmake_metadata",
+                    "demmake_metadata",
+                    "Contour generation cache metadata",
+                )
+            )
+
     # 从DEM文件提取等高线
-    def generate_contour_from_dem(self, dem_file=None, contour_file=None,interval=10.0):
-        if os.path.exists(self.CONTOUR_FILE):
-            print(f"警告: 等高线文件已存在: {self.CONTOUR_FILE}")
-            print(f"跳过等高线提取，直接使用已存在文件: {self.CONTOUR_FILE}")
-            return self.CONTOUR_FILE
+    def generate_contour_from_dem(self, dem_file=None, contour_file=None, interval=None):
         """
         从DEM文件提取等高线，生成 CONTOUR_FILE 文件
         
@@ -2127,6 +2175,7 @@ class DemMakeQGISHeadless:
         str: 等高线文件路径，如果失败返回None
         """
         import subprocess
+        import sqlite3
         
         print("\n=== 开始提取等高线 ===")
         
@@ -2135,10 +2184,29 @@ class DemMakeQGISHeadless:
         
         if contour_file is None:
             contour_file = self.CONTOUR_FILE
+
+        if interval is None:
+            interval = self.CONTOUR_INTERVAL
+
+        if interval <= 0:
+            raise ValueError("等高线间距必须大于0米")
         
         if not os.path.exists(dem_file):
             print(f"错误: DEM文件不存在: {dem_file}")
             return None
+
+        expected_metadata = {
+            "schema_version": "1",
+            "interval": format(float(interval), ".17g"),
+            "dem_sha256": self._sha256_file(dem_file),
+        }
+        if os.path.exists(contour_file):
+            cached_metadata = self._read_contour_metadata(contour_file)
+            if cached_metadata == expected_metadata:
+                print(f"等高线文件及生成参数匹配，复用缓存: {contour_file}")
+                return contour_file
+            print("等高线缓存参数或输入DEM已变化，重新生成")
+            os.remove(contour_file)
         
         os.environ['GDAL_DATA'] = os.path.join(sys.prefix, "Library", "share", "gdal")
         os.environ['PATH'] = f"{os.path.join(sys.prefix, 'Library', 'bin')};{os.environ['PATH']}"
@@ -2162,6 +2230,10 @@ class DemMakeQGISHeadless:
             )
             print("等高线提取成功")
             if os.path.exists(contour_file):
+                try:
+                    self._write_contour_metadata(contour_file, expected_metadata)
+                except sqlite3.Error as error:
+                    print(f"警告: 等高线已生成，但缓存元数据写入失败: {error}")
                 self.CONTOUR_FILE = contour_file
                 return contour_file
             else:
@@ -2473,7 +2545,9 @@ class DemMakeQGISHeadless:
         border=None,
         longest_side=None,
         project_scale_parm=None,
-        icon_clr=None
+        icon_clr=None,
+        grid_interval_seconds=None,
+        contour_interval=None
         ):
         """
         打印地图
@@ -2487,6 +2561,8 @@ class DemMakeQGISHeadless:
         border (float): 边框宽度。
         longest_side (float): 最长边长度。
         project_scale_parm (float): 项目比例参数。
+        grid_interval_seconds (float): 经纬网格间距，单位角秒；60角秒=1角分，3600角秒=1度。None时使用模板公式。
+        contour_interval (float): 等高线间距，单位米。
         
         返回:
         None
@@ -2513,7 +2589,9 @@ class DemMakeQGISHeadless:
             QgsExpressionContextUtils, 
             QgsLayoutExporter,
             QgsPathResolver,
-            QgsVectorLayer
+            QgsVectorLayer,
+            QgsLayoutObject,
+            QgsProperty
         )
         from qgis.PyQt.QtXml import QDomDocument
         from qgis.PyQt.QtCore import QSize, QRectF
@@ -2582,6 +2660,57 @@ class DemMakeQGISHeadless:
             self.qgs_app.exitQgis()
             sys.exit(1)
 
+        expression_options = doc.elementsByTagName("Option")
+        for option_index in range(expression_options.count()):
+            expression_option = expression_options.at(option_index).toElement()
+            if expression_option.attribute("name") != "expression":
+                continue
+            original_expression = expression_option.attribute("value")
+            if (original_expression.startswith("case when bounds_width(")
+                    and "ceil(round(bounds_width(" in original_expression
+                    and "+'秒'" in original_expression):
+                expression_option.setAttribute(
+                    "value",
+                    "case when @grid_interval_seconds is not null "
+                    "then to_string(@grid_interval_seconds)+'秒' else "
+                    f"({original_expression}) end"
+                )
+
+        rows = doc.elementsByTagName("row")
+        for row_index in range(rows.count()):
+            row = rows.at(row_index).toElement()
+            cells = []
+            cell_node = row.firstChild()
+            while not cell_node.isNull():
+                cell = cell_node.toElement()
+                if cell.tagName() == "Option" and cell.attribute("type") == "Map":
+                    cells.append(cell)
+                cell_node = cell_node.nextSibling()
+
+            for cell_index, cell in enumerate(cells[:-1]):
+                cell_content = cell.firstChild()
+                is_contour_interval_label = False
+                while not cell_content.isNull():
+                    content_element = cell_content.toElement()
+                    if (content_element.attribute("name") == "content"
+                            and content_element.attribute("value") == "等高线间距："):
+                        is_contour_interval_label = True
+                        break
+                    cell_content = cell_content.nextSibling()
+
+                if not is_contour_interval_label:
+                    continue
+
+                value_cell = cells[cell_index + 1]
+                value_content = value_cell.firstChild()
+                while not value_content.isNull():
+                    content_element = value_content.toElement()
+                    if content_element.attribute("name") == "content":
+                        content_element.setAttribute("value", f"{contour_interval:g}米")
+                        break
+                    value_content = value_content.nextSibling()
+                break
+
         layout = QgsPrintLayout(project_print)
         layout.initializeDefaults()
         print(f"已初始化布局模板: {self.QPT_PATH}")
@@ -2604,6 +2733,9 @@ class DemMakeQGISHeadless:
         QgsExpressionContextUtils.setLayoutVariable(layout, self.SYS_PARAMS_BLANK_PCT, blank_pct)
         QgsExpressionContextUtils.setLayoutVariable(layout, self.SYS_PARAMS_MAP_TITLE, map_title)
         QgsExpressionContextUtils.setLayoutVariable(layout, self.SYS_PARAMS_MAP_MAKER, map_maker)
+        QgsExpressionContextUtils.setLayoutVariable(
+            layout, "grid_interval_seconds", grid_interval_seconds
+        )
         if bg_satellite == self.BG_SATELLITE_Y:
             QgsExpressionContextUtils.setLayoutVariable(layout, self.SYS_PARAMS_ICON_CLR, self.ICON_CLR_orange)
         else:
@@ -2623,6 +2755,18 @@ class DemMakeQGISHeadless:
                 item.setLayers(layers_to_show)
                 item.setCrs(extent_map_layer.crs())
                 item.setExtent(map_extent)
+                if grid_interval_seconds is not None:
+                    interval_degrees = grid_interval_seconds / 3600.0
+                    for grid in item.grids().asList():
+                        properties = grid.dataDefinedProperties()
+                        properties.setProperty(
+                            QgsLayoutObject.MapGridIntervalX,
+                            QgsProperty.fromValue(interval_degrees)
+                        )
+                        properties.setProperty(
+                            QgsLayoutObject.MapGridIntervalY,
+                            QgsProperty.fromValue(interval_degrees)
+                        )
 
         '''
         print(f"tif_layer crs: {tdt_layer.crs()}")
@@ -2732,7 +2876,9 @@ class DemMakeQGISHeadless:
 
 
 def point_to_map(center_lon, center_lat, north_south_length, east_west_length, 
-                 project_dir,gpx_file_path=None,map_title="广州蓝天训练用途",map_maker="1121-奀奀的排骨"):
+                 project_dir, gpx_file_path=None, map_title="广州蓝天训练用途",
+                 map_maker="1121-奀奀的排骨", contour_interval=None,
+                 print_template="horizontal", grid_interval_seconds=None):
     """
     执行完整的地图制作工作流
     
@@ -2742,6 +2888,9 @@ def point_to_map(center_lon, center_lat, north_south_length, east_west_length,
         north_south_length (float): 南北边长（公里）
         east_west_length (float): 东西边长（公里）
         project_dir (str): 项目目录路径
+        contour_interval (float): 等高线间距，默认使用实例配置值
+        print_template (str): 模板选择，支持 horizontal/vertical/new 或 横向/纵向/新模板
+        grid_interval_seconds (float): 经纬网格间距，单位角秒；默认使用模板公式
         
     Returns:
         bool: 是否成功完成
@@ -2761,6 +2910,27 @@ def point_to_map(center_lon, center_lat, north_south_length, east_west_length,
             east_west_length_km=east_west_length,
             project_path=project_dir
         )
+
+        template_key = {
+            "横向": "horizontal",
+            "纵向": "vertical",
+            "新模板": "new",
+            "layoutmodel-new": "new",
+        }.get(print_template, print_template)
+        print_templates = {
+            "horizontal": maker.LAYOUT_MODEL_HORIZONTAL,
+            "vertical": maker.LAYOUT_MODEL_VERTICAL,
+            "new": maker.LAYOUT_MODEL_NEW,
+        }
+        if template_key not in print_templates:
+            raise ValueError("print_template 仅支持 horizontal/vertical/new 或 横向/纵向/新模板")
+        maker.QPT_PATH = print_templates[template_key]
+        if contour_interval is None:
+            contour_interval = maker.CONTOUR_INTERVAL
+        if contour_interval <= 0:
+            raise ValueError("contour_interval 必须大于0米")
+        if grid_interval_seconds is not None and grid_interval_seconds <= 0:
+            raise ValueError("grid_interval_seconds 必须大于0角秒")
 
         # 创建QGIS项目 ===========================
         print("\n创建QGIS项目...")
@@ -2786,7 +2956,10 @@ def point_to_map(center_lon, center_lat, north_south_length, east_west_length,
         extent_dem_resampled_file = maker.generate_dem_resampled_by_gra_cubic(dem_file=extent_dem_file, resolution_m=10)
         
         # 生成等高线图层
-        extent_dem_contour_file = maker.generate_contour_from_dem(dem_file=extent_dem_resampled_file,interval=20.0)
+        extent_dem_contour_file = maker.generate_contour_from_dem(
+            dem_file=extent_dem_resampled_file,
+            interval=contour_interval
+        )
 
         # 生成高程渲染图层
         extent_dem_render_file = maker.make_dem_render_layer(dem_file=extent_dem_resampled_file)
@@ -2939,7 +3112,9 @@ def point_to_map(center_lon, center_lat, north_south_length, east_west_length,
             tdt_layer],
             bg_satellite=maker.BG_SATELLITE_Y,
             map_title=map_title,
-            map_maker=map_maker
+            map_maker=map_maker,
+            grid_interval_seconds=grid_interval_seconds,
+            contour_interval=contour_interval
             )
 
         # OSM地图+等高线+山体阴影+DEM高程渲染层
@@ -2953,7 +3128,9 @@ def point_to_map(center_lon, center_lat, north_south_length, east_west_length,
             osm_points_layer,osm_lines_layer,osm_multipolygons_layer,
             dem_hillshade_layer,dem_layer],
             map_title=map_title,
-            map_maker=map_maker
+            map_maker=map_maker,
+            grid_interval_seconds=grid_interval_seconds,
+            contour_interval=contour_interval
             )
 
         # 待操作 - OSM地图（定制样式）+等高线+山体阴影+地图范围样式（底色）
@@ -2981,13 +3158,17 @@ def haversine_distance(lon1, lat1, lon2, lat2):
     return R * c
 
 def gpx_to_map(gpx_file_path, project_dir,
-               map_title=None,map_maker=None):
+               map_title=None, map_maker=None, contour_interval=None,
+               print_template="horizontal", grid_interval_seconds=None):
     """
     根据GPX轨迹文件生成地图项目
     
     Args:
         gpx_file_path (str): GPX文件路径
         project_dir (str): 项目目录路径
+        contour_interval (float): 等高线间距，默认使用实例配置值
+        print_template (str): 打印模板方向，支持 horizontal/vertical 或 横向/纵向
+        grid_interval_seconds (float): 经纬网格间距，单位角秒；默认使用模板公式
         
     Returns:
         bool: 是否成功完成
@@ -3063,7 +3244,10 @@ def gpx_to_map(gpx_file_path, project_dir,
         print("\n=== 开始生成地图项目 ===")
         success = point_to_map(center_lon, center_lat, north_south_length_km, east_west_length_km, 
                                project_dir, gpx_file_path=gpx_file_path,
-                               map_title=map_title,map_maker=map_maker)
+                               map_title=map_title, map_maker=map_maker,
+                               contour_interval=contour_interval,
+                               print_template=print_template,
+                               grid_interval_seconds=grid_interval_seconds)
         
         if success:
             print(f"\n=== GPX轨迹地图生成完成 ===")
@@ -3150,23 +3334,27 @@ if __name__ == "__main__":
     # point_to_map(center_lon=113.428453, center_lat=23.191103, north_south_length=15, east_west_length=10, 
     #     project_dir=r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto01", 
     #     gpx_file_path=r"C:\Users\Administrator\Desktop\QGIS\地图制作\火帽北山\2024-03-03 07 57 火北帽.gpx")
-    r'''
+    r''''''
     point_to_map(center_lon=113.375531, center_lat=23.243997, north_south_length=5.5, east_west_length=6.5, 
-        project_dir=r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto2026082801",
+        project_dir=r"C:\Users\Administrator\Desktop\QGIS\地图制作\广州蓝天救援协会大源杓麻训练地图",
         map_title="广州蓝天救援协会大源杓麻训练地图",
-        map_maker="1121-奀奀的排骨"
+        map_maker="1121-奀奀的排骨",
+        grid_interval_seconds=10,
+        contour_interval=10
         )
-    '''
+
     r'''
-    # 23.23448,113.55742
-    point_to_map(center_lon=113.55742, center_lat=23.23448, north_south_length=6, east_west_length=7, 
-        project_dir=r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto2026082803",
-        map_title="广州蓝天救援协会训练地图",
+    # 23.13323460,113.48018936
+    point_to_map(center_lon=113.48018936, center_lat=23.13323460, north_south_length=1.2, east_west_length=1.2,
+        project_dir=r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto20261017",
+        map_title="DTS",
         map_maker="1121-奀奀的排骨"
         )
     '''
+
+    r'''
     gpx_to_map(r"C:\Users\Administrator\Desktop\QGIS\地图制作\新建文件夹\20260918牛头山∽乌石山环线整理-3.gpx", 
        r"C:\Users\Administrator\Desktop\QGIS\地图制作\广州蓝天牛头山巡山路线图3-乌石山环线",
         map_title="广州蓝天牛头山巡山路线图3",
         map_maker="1121-奀奀的排骨")
-
+    '''
