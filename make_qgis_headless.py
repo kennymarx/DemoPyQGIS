@@ -110,6 +110,10 @@ class DemMakeQGISHeadless:
         self.EXTENT_ROUTE_LAYER = os.path.join(self.project_path, "extent_route_layer.gpkg")
         self.EXTENT_ROUTE_LAYER_NAME = "extent_route_layer"
 
+        # 特殊标注点图层
+        self.EXTENT_MARKER_LAYER = os.path.join(self.project_path, "extent_marker_layer.gpkg")
+        self.EXTENT_MARKER_LAYER_NAME = "extent_marker_layer"
+
         # DEM图层
         self.EXTENT_DEM = os.path.join(self.project_path, "extent_dem.tif")
         self.EXTENT_DEM_LAYER_NAME = "extent_dem"
@@ -157,6 +161,7 @@ class DemMakeQGISHeadless:
             self.EXTENT_DEM_HILLSHADOW_LAYER_NAME:os.path.join(self.TEMPLATE_PATH, "山体阴影样式.qml"),
             self.EXTENT_DEM_HILLSHADOW_EXAG_LAYER_NAME:os.path.join(self.TEMPLATE_PATH, "山体阴影样式.qml"),
             self.EXTENT_ROUTE_LAYER_NAME:os.path.join(self.TEMPLATE_PATH, "轨迹图层样式.qml"),
+            self.EXTENT_MARKER_LAYER_NAME:os.path.join(self.TEMPLATE_PATH, "POI图层样式.qml"),
             self.GOOGLE_MAP_LAYER_NAME:os.path.join(self.TEMPLATE_PATH, "谷歌卫图图层样式.qml"),
             self.GAODE_MAP_LAYER_NAME:os.path.join(self.TEMPLATE_PATH, "高德地图图层样式.qml"),
         }
@@ -2880,13 +2885,134 @@ class DemMakeQGISHeadless:
             return None
 
 
-def point_to_map(center_lon, center_lat, north_south_length, east_west_length, 
+    # 特殊标注点图层
+    def make_marker_layer(self, marker_list):
+        """
+        根据标注点列表生成特殊标注点图层（GPKG，EPSG:4326）。
+
+        marker_list 元素格式（英文键）:
+            [{"lon": 113.3, "lat": 23.2, "name": "起点", "type": "营地"}, ...]
+
+        节点类型 type 建议取值（对应 POI图层样式.qml 规则，未匹配走 ELSE 兜底样式）:
+            电塔/站点/山峰/公厕/停车场/油站/公安/医院/机关/中继/MCU/水源/营地/重点/路点
+
+        参数:
+        marker_list (list[dict]): 标注点列表，键为 lon/lat/name/type
+
+        返回:
+        str: 成功返回图层文件路径，失败返回None
+        """
+        from qgis.core import (
+            QgsVectorLayer, QgsField, QgsFeature, QgsGeometry, QgsPointXY,
+            QgsVectorFileWriter
+        )
+        from qgis.PyQt.QtCore import QMetaType
+
+        print(f"\n=== 开始创建特殊标注点图层 ===")
+        print(f"标注点数量: {len(marker_list)}")
+
+        try:
+            if not marker_list:
+                print("错误: marker_list 为空")
+                return None
+
+            temp_layer = QgsVectorLayer("point?crs=epsg:4326",
+                                        self.EXTENT_MARKER_LAYER_NAME, "memory")
+            if not temp_layer.isValid():
+                raise RuntimeError("内存点图层创建失败")
+
+            temp_layer.startEditing()
+            temp_layer.dataProvider().addAttributes([
+                QgsField("name", QMetaType.Type.String, "utf8", 100),
+                QgsField("type", QMetaType.Type.String, "utf8", 50),
+            ])
+            temp_layer.updateFields()
+
+            # 与 POI图层样式.qml 规则对应的节点类型
+            valid_types = {"电塔", "站点", "山峰", "公厕", "停车场", "油站", "公安",
+                           "医院", "机关", "中继", "MCU", "水源", "营地", "重点", "路点"}
+
+            # 地图范围（用于图幅外警告，不做裁剪，GPKG 保留全量）
+            extent_geom = None
+            if os.path.exists(self.MAP_EXTENT_4326):
+                extent_layer = QgsVectorLayer(self.MAP_EXTENT_4326, "地图范围", "ogr")
+                if extent_layer.isValid() and extent_layer.featureCount() > 0:
+                    extent_geom = next(extent_layer.getFeatures()).geometry()
+
+            added = 0
+            for index, item in enumerate(marker_list):
+                lon = item.get("lon")
+                lat = item.get("lat")
+                name = str(item.get("name") or "")
+                mtype = str(item.get("type") or "")
+
+                if lon is None or lat is None:
+                    print(f"警告: 第{index}个标注点缺少经纬度，已跳过: {item}")
+                    continue
+                lon = float(lon)
+                lat = float(lat)
+
+                # 经纬度颠倒容错：纬度越界且经度在纬度合法范围内时自动交换
+                if abs(lat) > 90 and abs(lon) <= 90:
+                    print(f"警告: 第{index}个标注点疑似经纬度颠倒，已自动交换: ({lon}, {lat}) -> ({lat}, {lon})")
+                    lon, lat = lat, lon
+
+                if not (-180 <= lon <= 180 and -90 <= lat <= 90):
+                    print(f"警告: 第{index}个标注点经纬度超出范围，已跳过: ({lon}, {lat})")
+                    continue
+
+                if extent_geom is not None and not extent_geom.contains(QgsGeometry.fromPointXY(QgsPointXY(lon, lat))):
+                    print(f"警告: 第{index}个标注点在地图范围之外: ({lon}, {lat}) {name}")
+
+                if mtype and mtype not in valid_types:
+                    print(f"警告: 第{index}个标注点节点类型 '{mtype}' 无对应图标规则，将使用兜底样式")
+
+                feature = QgsFeature()
+                feature.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(lon, lat)))
+                feature.setAttributes([name, mtype])
+                temp_layer.dataProvider().addFeature(feature)
+                added += 1
+
+            temp_layer.updateExtents()
+            temp_layer.commitChanges()
+
+            if added == 0:
+                print("错误: 没有有效标注点，未生成图层")
+                return None
+
+            options = QgsVectorFileWriter.SaveVectorOptions()
+            options.driverName = "GPKG"
+            options.fileEncoding = "UTF-8"
+            options.layerName = self.EXTENT_MARKER_LAYER_NAME
+            options.overwrite = True
+            QgsVectorFileWriter.writeAsVectorFormatV3(
+                temp_layer,
+                self.EXTENT_MARKER_LAYER,
+                self.project.transformContext(),
+                options
+            )
+
+            if not os.path.exists(self.EXTENT_MARKER_LAYER) or os.path.getsize(self.EXTENT_MARKER_LAYER) == 0:
+                print("错误: 特殊标注点图层写入失败")
+                return None
+
+            print(f"特殊标注点图层已保存: {self.EXTENT_MARKER_LAYER}（{added} 个点）")
+            return self.EXTENT_MARKER_LAYER
+        except Exception as e:
+            print(f"创建特殊标注点图层失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+
+def point_to_map(center_lon, center_lat, north_south_length, east_west_length,
                  project_dir, gpx_file_path=None, map_title="广州蓝天训练用途",
                  map_maker="1121-奀奀的排骨", contour_interval=None,
-                 print_template="horizontal", grid_interval_seconds=None):
+                 print_template="horizontal", grid_interval_seconds=None,
+                 marker_list=None):
     """
     执行完整的地图制作工作流
-    
+
     Args:
         center_lon (float): 中心点经度
         center_lat (float): 中心点纬度
@@ -2896,7 +3022,9 @@ def point_to_map(center_lon, center_lat, north_south_length, east_west_length,
         contour_interval (float): 等高线间距，默认使用实例配置值
         print_template (str): 模板选择，支持 horizontal/vertical/new 或 横向/纵向/新模板
         grid_interval_seconds (float): 经纬网格间距，单位角秒；默认使用模板公式
-        
+        marker_list (list): 特殊标注点列表，非空时生成特殊标注点图层并加入项目。
+            元素格式（英文键）: [{"lon": 113.3, "lat": 23.2, "name": "起点", "type": "营地"}, ...]
+
     Returns:
         bool: 是否成功完成
     """
@@ -2980,6 +3108,10 @@ def point_to_map(center_lon, center_lat, north_south_length, east_west_length,
             print(f"生成轨迹图层: {gpx_file_path}")
             extent_route_file = maker.make_route_layer(gpx_file_path)
             print(f"生成轨迹图层: {gpx_file_path} 结束")
+
+        # 生成特殊标注点图层
+        if marker_list:
+            marker_file = maker.make_marker_layer(marker_list)
 
         # OSM数据处理：相交产物(extent_osm_*.gpkg)已全部生成时，跳过下载/提取/相交（断点续传）
         extent_osm_files = maker._get_cached_extent_osm_files()
@@ -3077,6 +3209,14 @@ def point_to_map(center_lon, center_lat, north_south_length, east_west_length,
                 layer_style=maker.DEFAULT_TEMPLATE[maker.EXTENT_ROUTE_LAYER_NAME]
             )
 
+        # 添加特殊标注点图层
+        if "marker_file" in locals():
+            maker.add_layer_to_project(
+                layer_path=marker_file,
+                layer_name=maker.EXTENT_MARKER_LAYER_NAME,
+                layer_style=maker.DEFAULT_TEMPLATE[maker.EXTENT_MARKER_LAYER_NAME]
+            )
+
         # 添加打印模板-横向 layoutmodel-横向.qpt
         maker.add_layout_templet(maker.LAYOUT_MODEL_HORIZONTAL, maker.LAYOUT_MODEL_HORIZONTAL_NAME)
         # 添加打印模板-纵向 layoutmodel-纵向.qpt
@@ -3101,6 +3241,12 @@ def point_to_map(center_lon, center_lat, north_south_length, east_west_length,
         else:
             route_layer = None
 
+        # 特殊标注点图层（列表首位 = 渲染最顶层）
+        if marker_list and os.path.exists(maker.EXTENT_MARKER_LAYER):
+            marker_layer = maker.load_vector_layer(maker.EXTENT_MARKER_LAYER, maker.EXTENT_MARKER_LAYER_NAME,maker.DEFAULT_TEMPLATE[maker.EXTENT_MARKER_LAYER_NAME])
+        else:
+            marker_layer = None
+
         contour_layer = maker.load_vector_layer(maker.CONTOUR_FILE, maker.CONTOUR_LAYER_NAME,maker.DEFAULT_TEMPLATE[maker.CONTOUR_LAYER_NAME])
 
         # 优先使用高德地图图层，如果不存在则使用谷歌地图图层，其他情况使用天地图。
@@ -3110,8 +3256,9 @@ def point_to_map(center_lon, center_lat, north_south_length, east_west_length,
             tdt_layer = maker.load_raster_layer(maker.GOOGLE_MAP, maker.GOOGLE_MAP_LAYER_NAME,maker.DEFAULT_TEMPLATE[maker.GOOGLE_MAP_LAYER_NAME])
         else:
             tdt_layer = maker.load_raster_layer(maker.TDT_MAP, maker.TDT_MAP_LAYER_NAME,maker.DEFAULT_TEMPLATE[maker.TDT_MAP_LAYER_NAME])
-        
-        maker.export_map_by_layout_templet(layers_to_show=[contour_layer,
+
+        maker.export_map_by_layout_templet(layers_to_show=[marker_layer,
+            contour_layer,
             route_layer,
             osm_points_layer,osm_lines_layer,osm_multipolygons_layer,
             tdt_layer],
@@ -3128,7 +3275,8 @@ def point_to_map(center_lon, center_lat, north_south_length, east_west_length,
         #dem_hillshade_layer = maker.load_raster_layer(maker.EXTENT_DEM_HILLSHADOW, maker.EXTENT_DEM_HILLSHADOW_LAYER_NAME,maker.DEFAULT_TEMPLATE[maker.EXTENT_DEM_HILLSHADOW_LAYER_NAME])
         # 夸张的阴影图层
         dem_hillshade_layer = maker.load_raster_layer(maker.EXTENT_DEM_HILLSHADOW_EXAG, maker.EXTENT_DEM_HILLSHADOW_EXAG_LAYER_NAME,maker.DEFAULT_TEMPLATE[maker.EXTENT_DEM_HILLSHADOW_EXAG_LAYER_NAME])
-        maker.export_map_by_layout_templet(layers_to_show=[contour_layer,
+        maker.export_map_by_layout_templet(layers_to_show=[marker_layer,
+            contour_layer,
             route_layer,
             osm_points_layer,osm_lines_layer,osm_multipolygons_layer,
             dem_hillshade_layer,dem_layer],
@@ -3164,17 +3312,22 @@ def haversine_distance(lon1, lat1, lon2, lat2):
 
 def gpx_to_map(gpx_file_path, project_dir,
                map_title=None, map_maker=None, contour_interval=None,
-               print_template="horizontal", grid_interval_seconds=None):
+               print_template="horizontal", grid_interval_seconds=None,
+               marker_list=None):
     """
     根据GPX轨迹文件生成地图项目
-    
+
     Args:
         gpx_file_path (str): GPX文件路径
         project_dir (str): 项目目录路径
+        map_title (str): 地图标题
+        map_maker (str): 地图制作人
         contour_interval (float): 等高线间距，默认使用实例配置值
         print_template (str): 打印模板方向，支持 horizontal/vertical 或 横向/纵向
         grid_interval_seconds (float): 经纬网格间距，单位角秒；默认使用模板公式
-        
+        marker_list (list): 特殊标注点列表，非空时生成特殊标注点图层并加入项目。
+            元素格式（英文键）: [{"lon": 113.3, "lat": 23.2, "name": "起点", "type": "营地"}, ...]
+
     Returns:
         bool: 是否成功完成
     """
@@ -3247,12 +3400,13 @@ def gpx_to_map(gpx_file_path, project_dir,
         
         # 8. 调用point_to_map生成地图
         print("\n=== 开始生成地图项目 ===")
-        success = point_to_map(center_lon, center_lat, north_south_length_km, east_west_length_km, 
+        success = point_to_map(center_lon, center_lat, north_south_length_km, east_west_length_km,
                                project_dir, gpx_file_path=gpx_file_path,
                                map_title=map_title, map_maker=map_maker,
                                contour_interval=contour_interval,
                                print_template=print_template,
-                               grid_interval_seconds=grid_interval_seconds)
+                               grid_interval_seconds=grid_interval_seconds,
+                               marker_list=marker_list)
         
         if success:
             print(f"\n=== GPX轨迹地图生成完成 ===")
