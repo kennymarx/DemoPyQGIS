@@ -2923,8 +2923,8 @@ class DemMakeQGISHeadless:
 
             temp_layer.startEditing()
             temp_layer.dataProvider().addAttributes([
-                QgsField("name", QMetaType.Type.String, "utf8", 100),
-                QgsField("type", QMetaType.Type.String, "utf8", 50),
+                QgsField("name", QMetaType.Type.QString, "utf8", 100),
+                QgsField("type", QMetaType.Type.QString, "utf8", 50),
             ])
             temp_layer.updateFields()
 
@@ -3508,11 +3508,21 @@ if __name__ == "__main__":
     # 东经 113.4765°，北纬 23.2258°
     # 23.224624, 113.470941
     point_to_map(center_lon=113.470941, center_lat=23.224624, north_south_length=7, east_west_length=7,
-        project_dir=r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto2026102302",
+        project_dir=r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto2026102301",
         map_title="2026102301",
         map_maker="1121-奀奀的排骨",
         grid_interval_seconds=20,
-        contour_interval=10
+        contour_interval=10,
+        marker_list=[
+            {"lon": 113.470941, "lat": 23.224624, "name": "基准坐标", "type": "营地"},
+             
+            {"lon": 113.45165652600731, "lat": 23.231562525614827, "name": "测试A", "type": "营地"},
+            
+            {"lon": 113.47184096007946, "lat": 23.235454936681286, "name": "测试B", "type": "营地"},
+        ]
+
+
+
         )
     
 
