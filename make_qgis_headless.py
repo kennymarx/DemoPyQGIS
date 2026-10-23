@@ -173,24 +173,28 @@ class DemMakeQGISHeadless:
         self.DPI = 300
         # 打印地图最大边长
         self.SYS_PARAMS_LONGEST_SIDE = "Longest_side"
-        self.SYS_PARAMS_BLANK_PCT = "Blank_pct"
-        self.SYS_PARAMS_BORDER = "Border"
-        self.SYS_PARAMS_PROJECT_SCALE_PARM = "project_scale_parm"
-        self.SYS_PARAMS_BG_SATELLITE = "bg_satellite"
-
         self.LONGEST_SIDE = 1000.0
+        
+        self.SYS_PARAMS_BLANK_PCT = "Blank_pct"
         self.BLANK_PCT = 0.15
+        
+        self.SYS_PARAMS_BORDER = "Border"
         self.BORDER = 10.0
+        
+        self.SYS_PARAMS_PROJECT_SCALE_PARM = "project_scale_parm"
         self.PROJECT_SCALE_PARM = 1.0
+        
+        self.SYS_PARAMS_BG_SATELLITE = "bg_satellite"
         self.BG_SATELLITE_Y = 1
         self.BG_SATELLITE_N = 0
+        
+        self.SYS_PARAMS_ICON_CLR = "icon_clr"
         self.ICON_CLR = "default"
-        self.ICON_CLR_orange = "橙"
+        self.ICON_CLR_orange = "橙"    
+
         self.SYS_PARAMS_MAP_TITLE = "map_title"
         self.SYS_PARAMS_MAP_MAKER = "map_maker"
-        self.SYS_PARAMS_ICON_CLR = "icon_clr"
         
-
         os.makedirs(self.project_path, exist_ok=True)
 
         # 初始化项目资源
@@ -237,11 +241,12 @@ class DemMakeQGISHeadless:
         # 设置项目的坐标系wsg84
         self.project.setCrs(self.crs)
         # 设置项目常用属性
-        QgsExpressionContextUtils.setProjectVariable(self.project, "bg_satellite", '0')
-        QgsExpressionContextUtils.setProjectVariable(self.project, "Blank_pct", '0.15')
-        QgsExpressionContextUtils.setProjectVariable(self.project, "Border", '10')
-        QgsExpressionContextUtils.setProjectVariable(self.project, "Longest_side", self.LONGEST_SIDE)
-        QgsExpressionContextUtils.setProjectVariable(self.project, "project_scale_parm", '1')
+        QgsExpressionContextUtils.setProjectVariable(self.project, self.SYS_PARAMS_BG_SATELLITE, self.BG_SATELLITE_N)
+        QgsExpressionContextUtils.setProjectVariable(self.project, self.SYS_PARAMS_BLANK_PCT, self.BLANK_PCT)
+        QgsExpressionContextUtils.setProjectVariable(self.project, self.SYS_PARAMS_BORDER, self.BORDER)
+        QgsExpressionContextUtils.setProjectVariable(self.project, self.SYS_PARAMS_LONGEST_SIDE, self.LONGEST_SIDE)
+        QgsExpressionContextUtils.setProjectVariable(self.project, self.SYS_PARAMS_PROJECT_SCALE_PARM, self.PROJECT_SCALE_PARM)
+        QgsExpressionContextUtils.setProjectVariable(self.project, self.SYS_PARAMS_ICON_CLR, self.ICON_CLR)
         
     # 定义私有方法，将./resources目录下的所有文件拷贝到项目目录下
     def _copy_resources(self):
@@ -3334,23 +3339,28 @@ if __name__ == "__main__":
     # point_to_map(center_lon=113.428453, center_lat=23.191103, north_south_length=15, east_west_length=10, 
     #     project_dir=r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto01", 
     #     gpx_file_path=r"C:\Users\Administrator\Desktop\QGIS\地图制作\火帽北山\2024-03-03 07 57 火北帽.gpx")
-    r''''''
+    r'''
     point_to_map(center_lon=113.375531, center_lat=23.243997, north_south_length=5.5, east_west_length=6.5, 
         project_dir=r"C:\Users\Administrator\Desktop\QGIS\地图制作\广州蓝天救援协会大源杓麻训练地图",
         map_title="广州蓝天救援协会大源杓麻训练地图",
         map_maker="1121-奀奀的排骨",
         grid_interval_seconds=10,
-        contour_interval=10
-        )
-
-    r'''
-    # 23.13323460,113.48018936
-    point_to_map(center_lon=113.48018936, center_lat=23.13323460, north_south_length=1.2, east_west_length=1.2,
-        project_dir=r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto20261017",
-        map_title="DTS",
-        map_maker="1121-奀奀的排骨"
+        contour_interval=10,
+        print_template="vertical"
         )
     '''
+    r''''''
+    # 23.13323460,113.48018936
+    # 东经 113.4765°，北纬 23.2258°
+    # 23.224624, 113.470941
+    point_to_map(center_lon=113.470941, center_lat=23.224624, north_south_length=7, east_west_length=7,
+        project_dir=r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto2026102302",
+        map_title="2026102301",
+        map_maker="1121-奀奀的排骨",
+        grid_interval_seconds=20,
+        contour_interval=10
+        )
+    
 
     r'''
     gpx_to_map(r"C:\Users\Administrator\Desktop\QGIS\地图制作\新建文件夹\20260918牛头山∽乌石山环线整理-3.gpx", 
