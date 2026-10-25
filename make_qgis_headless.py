@@ -3005,6 +3005,13 @@ class DemMakeQGISHeadless:
             return None
 
 
+class DemMakeQGISMap:
+    """地图制作工作流门面：坐标入口 / GPX 轨迹入口。
+
+    本类只负责参数推导与流程编排，不持有实例状态（方法均为 classmethod/staticmethod），
+    单张地图的生成与导出委托 DemMakeQGISHeadless 完成。
+    """
+
     @classmethod
     def point_to_map(cls, center_lon, center_lat, north_south_length, east_west_length,
                      project_dir, gpx_file_path=None, map_title="广州蓝天训练用途",
@@ -3037,7 +3044,7 @@ class DemMakeQGISHeadless:
 
         try:
         	# 初始化地图制作器 ===========================
-            maker = cls(
+            maker = DemMakeQGISHeadless(
                 center_longitude=center_lon,
                 center_latitude=center_lat,
                 north_south_length_km=north_south_length,
@@ -3353,11 +3360,11 @@ class DemMakeQGISHeadless:
         max_ew_distance = 0
         for lon, lat in all_points:
             # 南北方向：根据纬度差计算
-            ns_distance = DemMakeQGISHeadless.haversine_distance(center_lon, center_lat, center_lon, lat)
+            ns_distance = cls.haversine_distance(center_lon, center_lat, center_lon, lat)
             if ns_distance > max_ns_distance:
                 max_ns_distance = ns_distance
             # 东西方向：根据经度差计算
-            ew_distance = DemMakeQGISHeadless.haversine_distance(center_lon, center_lat, lon, center_lat)
+            ew_distance = cls.haversine_distance(center_lon, center_lat, lon, center_lat)
             if ew_distance > max_ew_distance:
                 max_ew_distance = ew_distance
 
@@ -3442,9 +3449,9 @@ class DemMakeQGISHeadless:
 
 
 # ===== 向后兼容的模块级别名（老调用点无需修改）=====
-point_to_map = DemMakeQGISHeadless.point_to_map
-gpx_to_map = DemMakeQGISHeadless.gpx_to_map
-haversine_distance = DemMakeQGISHeadless.haversine_distance
+point_to_map = DemMakeQGISMap.point_to_map
+gpx_to_map = DemMakeQGISMap.gpx_to_map
+haversine_distance = DemMakeQGISMap.haversine_distance
 
 def main_point_to_map():
     """命令行入口函数"""
@@ -3499,7 +3506,7 @@ def main_point_to_map():
     args = parser.parse_args()
     
     # 执行工作流
-    success = point_to_map(
+    success = DemMakeQGISMap.point_to_map(
         center_lon=args.lon,
         center_lat=args.lat,
         north_south_length=args.ns_length,
