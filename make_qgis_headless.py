@@ -3005,6 +3005,268 @@ class DemMakeQGISHeadless:
             return None
 
 
+    def generate_project(self, gpx_file_path=None, contour_interval=None, marker_list=None):
+        """生成地图项目（不导出打印图）：创建项目 → 生成并添加各图层 → 保存 .qgz。
+
+        Args:
+            gpx_file_path (str | None): GPX轨迹文件路径，非空时生成轨迹图层
+            contour_interval (float): 等高线间距（米），须为正值（由调用方校验）
+            marker_list (list | None): 特殊标注点列表，非空时生成特殊标注点图层
+
+        Returns:
+            str: 项目文件路径（.qgz）
+        """
+        # 创建QGIS项目 ===========================
+        print("\n创建QGIS项目...")
+        self.create_project()
+
+        # 生成图层 ===========================
+        # 生成地图范围图层
+        map_extent_file = self.make_map_extent_layer()
+
+        # 生成天地图图层
+        extent_tianditu_file = self.make_tianditu_layer(zoom_level=18)
+
+        # 生成高德地图图层
+        extent_gaode_file = self.make_gaode_layer(zoom_level=18)
+
+        # 生成谷歌地图图层
+        extent_google_file = self.make_google_layer(zoom_level=18)
+
+        # 生成dem图层
+        extent_dem_file = self.extract_dem_by_extent(dem_files_dir=None, extent_gpkg=self.MAP_EXTENT_4326)
+
+        # 生成重采样dem图层
+        extent_dem_resampled_file = self.generate_dem_resampled_by_gra_cubic(dem_file=extent_dem_file, resolution_m=10)
+
+        # 生成等高线图层
+        extent_dem_contour_file = self.generate_contour_from_dem(
+            dem_file=extent_dem_resampled_file,
+            interval=contour_interval
+        )
+
+        # 生成高程渲染图层
+        extent_dem_render_file = self.make_dem_render_layer(dem_file=extent_dem_resampled_file)
+
+        # 生成阴影图层
+        extent_dem_hillshade_file = self.generate_hillshade(dem_file=extent_dem_resampled_file)
+
+        # 生成夸张的阴影图层
+        extent_dem_hillshade_extreme_file = self.generate_hillshade(dem_file=extent_dem_resampled_file, hillshade_file=self.EXTENT_DEM_HILLSHADOW_EXAG, z_factor=6)
+
+        # 生成轨迹图层
+        extent_route_file = None
+        if gpx_file_path:
+            print(f"生成轨迹图层: {gpx_file_path}")
+            extent_route_file = self.make_route_layer(gpx_file_path)
+            print(f"生成轨迹图层: {gpx_file_path} 结束")
+
+        # 生成特殊标注点图层
+        marker_file = None
+        if marker_list:
+            marker_file = self.make_marker_layer(marker_list)
+
+        # OSM数据处理：相交产物(extent_osm_*.gpkg)已全部生成时，跳过下载/提取/相交（断点续传）
+        extent_osm_files = self._get_cached_extent_osm_files()
+        if extent_osm_files is None:
+            # 下载OSM数据图层
+            osm_file = self.download_osm_data()
+
+            # 提取osm数据图层
+            osm_gpkg_files = self.extract_osm_to_gpkg(osm_file)
+
+            # 生成osm相交图层
+            extent_osm_files = self.intersect_osm_with_extent(extent_gpkg=self.MAP_EXTENT_4326, osm_layers=osm_gpkg_files)
+
+        # 添加图层到项目 ===========================
+        # 添加dem图层
+        self.add_layer_to_project(
+            layer_path=extent_dem_file,
+            layer_name=self.EXTENT_DEM_LAYER_NAME,
+            layer_style=None
+        )
+
+        # 添加重采样dem图层
+        self.add_layer_to_project(
+            layer_path=extent_dem_resampled_file,
+            layer_name=self.EXTENT_DEM_RESAMPLED_LAYER_NAME,
+            layer_style=None
+        )
+
+        # 添加高程渲染图层
+        self.add_layer_to_project(
+            layer_path=extent_dem_render_file,
+            layer_name=self.EXTENT_DEM_RENDER_LAYER_NAME,
+            layer_style=self.DEFAULT_TEMPLATE[self.EXTENT_DEM_RENDER_LAYER_NAME]
+        )
+
+        # 添加地图范围
+        self.add_layer_to_project(
+            layer_path=map_extent_file,
+            layer_name=self.MAP_EXTENT_LAYER_NAME,
+            layer_style=self.DEFAULT_TEMPLATE[self.MAP_EXTENT_LAYER_NAME]
+        )
+
+        r''''''
+        # 添加天地图图层
+        self.add_layer_to_project(
+            layer_path=extent_tianditu_file,
+            layer_name=self.TIANDITU_MAP_LAYER_NAME,
+            #layer_style=self.DEFAULT_TEMPLATE[self.GOOGLE_MAP_LAYER_NAME]
+        )
+
+
+        # 添加谷歌地图图层
+        self.add_layer_to_project(
+            layer_path=extent_google_file,
+            layer_name=self.GOOGLE_MAP_LAYER_NAME,
+            layer_style=self.DEFAULT_TEMPLATE[self.GOOGLE_MAP_LAYER_NAME]
+        )
+
+        # 添加高德地图图层
+        self.add_layer_to_project(
+            layer_path=extent_gaode_file,
+            layer_name=self.GAODE_MAP_LAYER_NAME,
+            #layer_style=self.DEFAULT_TEMPLATE[self.GAODE_MAP_LAYER_NAME]
+        )
+
+        # 添加等高线图层
+        self.add_layer_to_project(
+            layer_path=extent_dem_contour_file,
+            layer_name=self.CONTOUR_LAYER_NAME,
+            layer_style=self.DEFAULT_TEMPLATE[self.CONTOUR_LAYER_NAME]
+        )
+
+        # 添加osm
+        self.add_extent_osm_layers_with_styles(extent_osm_files)
+
+        # 添加夸张的阴影图层
+        self.add_layer_to_project(
+            layer_path=extent_dem_hillshade_extreme_file,
+            layer_name=self.EXTENT_DEM_HILLSHADOW_EXAG_LAYER_NAME,
+            layer_style=self.DEFAULT_TEMPLATE[self.EXTENT_DEM_HILLSHADOW_EXAG_LAYER_NAME]
+        )
+
+        # 添加阴影图层
+        self.add_layer_to_project(
+            layer_path=extent_dem_hillshade_file,
+            layer_name=self.EXTENT_DEM_HILLSHADOW_LAYER_NAME,
+            layer_style=self.DEFAULT_TEMPLATE[self.EXTENT_DEM_HILLSHADOW_LAYER_NAME]
+        )
+
+        # 添加轨迹图层
+        if extent_route_file:
+            self.add_layer_to_project(
+                layer_path=extent_route_file,
+                layer_name=self.EXTENT_ROUTE_LAYER_NAME,
+                layer_style=self.DEFAULT_TEMPLATE[self.EXTENT_ROUTE_LAYER_NAME]
+            )
+
+        # 添加特殊标注点图层
+        if marker_file:
+            self.add_layer_to_project(
+                layer_path=marker_file,
+                layer_name=self.EXTENT_MARKER_LAYER_NAME,
+                layer_style=self.DEFAULT_TEMPLATE[self.EXTENT_MARKER_LAYER_NAME]
+            )
+
+        # 添加打印模板-横向 layoutmodel-横向.qpt
+        self.add_layout_templet(self.LAYOUT_MODEL_HORIZONTAL, self.LAYOUT_MODEL_HORIZONTAL_NAME)
+        # 添加打印模板-纵向 layoutmodel-纵向.qpt
+        self.add_layout_templet(self.LAYOUT_MODEL_VERTICAL, self.LAYOUT_MODEL_VERTICAL_NAME)
+
+        # 保存项目
+        print("保存项目...")
+        project_path = self.save_project()
+
+        print(f"项目已保存到: {project_path}")
+
+        return project_path
+
+
+    def export_print_maps(self, map_title="广州蓝天训练用途", map_maker="1121-奀奀的排骨",
+                         grid_interval_seconds=None, contour_interval=None,
+                         gpx_file_path=None, marker_list=None):
+        """从磁盘产物重载图层并导出打印图（自建打印项目，不依赖内存项目状态）。
+
+        注意：本方法内部会清空全局 QgsProject，调用后不可再操作 generate_project
+        构建的项目——两个阶段必须先全部生成、再统一导出，不可交错。
+
+        Args:
+            map_title (str): 地图标题
+            map_maker (str): 地图制作人
+            grid_interval_seconds (float | None): 经纬网格间距（角秒），None 用模板公式
+            contour_interval (float): 等高线间距（米），与生成阶段一致
+            gpx_file_path (str | None): GPX轨迹文件路径，非空且存在时加载轨迹图层
+            marker_list (list | None): 特殊标注点列表，非空且图层存在时加载标注点图层
+
+        Returns:
+            bool: 是否成功完成
+        """
+        # 导出地图验证 ===========================
+        print("\n=== 开始导出地图验证 ===")
+
+        # OSM地图+等高线+影像地图
+        osm_points_layer = self.load_vector_layer(self.EXTENT_OSM_POINTS, self.EXTENT_OSM_POINTS_LAYER_NAME,self.DEFAULT_TEMPLATE[self.EXTENT_OSM_POINTS_LAYER_NAME])
+        osm_lines_layer = self.load_vector_layer(self.EXTENT_OSM_LINES, self.EXTENT_OSM_LINES_LAYER_NAME,self.DEFAULT_TEMPLATE[self.EXTENT_OSM_LINES_LAYER_NAME])
+        osm_multipolygons_layer = self.load_vector_layer(self.EXTENT_OSM_MULTIPOLYGONS, self.EXTENT_OSM_MULTIPOLYGONS_LAYER_NAME,self.DEFAULT_TEMPLATE[self.EXTENT_OSM_MULTIPOLYGONS_LAYER_NAME])
+
+        if gpx_file_path and os.path.exists(gpx_file_path):
+            route_layer = self.load_vector_layer(self.EXTENT_ROUTE_LAYER, self.EXTENT_ROUTE_LAYER_NAME,self.DEFAULT_TEMPLATE[self.EXTENT_ROUTE_LAYER_NAME])
+        else:
+            route_layer = None
+
+        # 特殊标注点图层（列表首位 = 渲染最顶层）
+        if marker_list and os.path.exists(self.EXTENT_MARKER_LAYER):
+            marker_layer = self.load_vector_layer(self.EXTENT_MARKER_LAYER, self.EXTENT_MARKER_LAYER_NAME,self.DEFAULT_TEMPLATE[self.EXTENT_MARKER_LAYER_NAME])
+        else:
+            marker_layer = None
+
+        contour_layer = self.load_vector_layer(self.CONTOUR_FILE, self.CONTOUR_LAYER_NAME,self.DEFAULT_TEMPLATE[self.CONTOUR_LAYER_NAME])
+
+        # 优先使用高德地图图层，如果不存在则使用谷歌地图图层，其他情况使用天地图。
+        if os.path.exists(self.GAODE_MAP):
+            tdt_layer = self.load_raster_layer(self.GAODE_MAP, self.GAODE_MAP_LAYER_NAME,self.DEFAULT_TEMPLATE[self.GAODE_MAP_LAYER_NAME])
+        elif os.path.exists(self.GOOGLE_MAP):
+            tdt_layer = self.load_raster_layer(self.GOOGLE_MAP, self.GOOGLE_MAP_LAYER_NAME,self.DEFAULT_TEMPLATE[self.GOOGLE_MAP_LAYER_NAME])
+        else:
+            tdt_layer = self.load_raster_layer(self.TDT_MAP, self.TDT_MAP_LAYER_NAME,self.DEFAULT_TEMPLATE[self.TDT_MAP_LAYER_NAME])
+
+        self.export_map_by_layout_templet(layers_to_show=[marker_layer,
+            contour_layer,
+            route_layer,
+            osm_points_layer,osm_lines_layer,osm_multipolygons_layer,
+            tdt_layer],
+            bg_satellite=self.BG_SATELLITE_Y,
+            map_title=map_title,
+            map_maker=map_maker,
+            grid_interval_seconds=grid_interval_seconds,
+            contour_interval=contour_interval
+            )
+
+        # OSM地图+等高线+山体阴影+DEM高程渲染层
+        dem_layer = self.load_raster_layer(self.EXTENT_DEM_RENDER_LAYER, self.EXTENT_DEM_RENDER_LAYER_NAME,self.DEFAULT_TEMPLATE[self.EXTENT_DEM_RENDER_LAYER_NAME])
+        # 山体阴影图层
+        #dem_hillshade_layer = self.load_raster_layer(self.EXTENT_DEM_HILLSHADOW, self.EXTENT_DEM_HILLSHADOW_LAYER_NAME,self.DEFAULT_TEMPLATE[self.EXTENT_DEM_HILLSHADOW_LAYER_NAME])
+        # 夸张的阴影图层
+        dem_hillshade_layer = self.load_raster_layer(self.EXTENT_DEM_HILLSHADOW_EXAG, self.EXTENT_DEM_HILLSHADOW_EXAG_LAYER_NAME,self.DEFAULT_TEMPLATE[self.EXTENT_DEM_HILLSHADOW_EXAG_LAYER_NAME])
+        self.export_map_by_layout_templet(layers_to_show=[marker_layer,
+            contour_layer,
+            route_layer,
+            osm_points_layer,osm_lines_layer,osm_multipolygons_layer,
+            dem_hillshade_layer,dem_layer],
+            map_title=map_title,
+            map_maker=map_maker,
+            grid_interval_seconds=grid_interval_seconds,
+            contour_interval=contour_interval
+            )
+
+        # 待操作 - OSM地图（定制样式）+等高线+山体阴影+地图范围样式（底色）
+
+        print("\n=== 所有测试完成 ===")
+        return True
+
+
 class DemMakeQGISMap:
     """地图制作工作流门面：坐标入口 / GPX 轨迹入口。
 
@@ -3073,231 +3335,21 @@ class DemMakeQGISMap:
             if grid_interval_seconds is not None and grid_interval_seconds <= 0:
                 raise ValueError("grid_interval_seconds 必须大于0角秒")
 
-            # 创建QGIS项目 ===========================
-            print("\n创建QGIS项目...")
-            maker.create_project()
-
-            # 生成图层 ===========================
-            # 生成地图范围图层
-            map_extent_file = maker.make_map_extent_layer()
-
-            # 生成天地图图层
-            extent_tianditu_file = maker.make_tianditu_layer(zoom_level=18)
-
-            # 生成高德地图图层
-            extent_gaode_file = maker.make_gaode_layer(zoom_level=18)
-
-            # 生成谷歌地图图层
-            extent_google_file = maker.make_google_layer(zoom_level=18)
-
-            # 生成dem图层
-            extent_dem_file = maker.extract_dem_by_extent(dem_files_dir=None, extent_gpkg=maker.MAP_EXTENT_4326)
-
-            # 生成重采样dem图层
-            extent_dem_resampled_file = maker.generate_dem_resampled_by_gra_cubic(dem_file=extent_dem_file, resolution_m=10)
-
-            # 生成等高线图层
-            extent_dem_contour_file = maker.generate_contour_from_dem(
-                dem_file=extent_dem_resampled_file,
-                interval=contour_interval
+            # 阶段编排：generate_project 与 export_print_maps 不可交错调用
+            # （后者会清空全局 QgsProject），必须先全部生成、再统一导出
+            maker.generate_project(
+                gpx_file_path=gpx_file_path,
+                contour_interval=contour_interval,
+                marker_list=marker_list
             )
-
-            # 生成高程渲染图层
-            extent_dem_render_file = maker.make_dem_render_layer(dem_file=extent_dem_resampled_file)
-
-            # 生成阴影图层
-            extent_dem_hillshade_file = maker.generate_hillshade(dem_file=extent_dem_resampled_file)
-
-            # 生成夸张的阴影图层
-            extent_dem_hillshade_extreme_file = maker.generate_hillshade(dem_file=extent_dem_resampled_file, hillshade_file=maker.EXTENT_DEM_HILLSHADOW_EXAG, z_factor=6)
-
-            # 生成轨迹图层
-            if gpx_file_path:
-                print(f"生成轨迹图层: {gpx_file_path}")
-                extent_route_file = maker.make_route_layer(gpx_file_path)
-                print(f"生成轨迹图层: {gpx_file_path} 结束")
-
-            # 生成特殊标注点图层
-            if marker_list:
-                marker_file = maker.make_marker_layer(marker_list)
-
-            # OSM数据处理：相交产物(extent_osm_*.gpkg)已全部生成时，跳过下载/提取/相交（断点续传）
-            extent_osm_files = maker._get_cached_extent_osm_files()
-            if extent_osm_files is None:
-                # 下载OSM数据图层
-                osm_file = maker.download_osm_data()
-
-                # 提取osm数据图层
-                osm_gpkg_files = maker.extract_osm_to_gpkg(osm_file)
-
-                # 生成osm相交图层
-                extent_osm_files = maker.intersect_osm_with_extent(extent_gpkg=maker.MAP_EXTENT_4326, osm_layers=osm_gpkg_files)
-
-            # 添加图层到项目 ===========================
-            # 添加dem图层
-            maker.add_layer_to_project(
-                layer_path=extent_dem_file,
-                layer_name=maker.EXTENT_DEM_LAYER_NAME,
-                layer_style=None
-            )
-
-            # 添加重采样dem图层
-            maker.add_layer_to_project(
-                layer_path=extent_dem_resampled_file,
-                layer_name=maker.EXTENT_DEM_RESAMPLED_LAYER_NAME,
-                layer_style=None
-            )
-
-            # 添加高程渲染图层
-            maker.add_layer_to_project(
-                layer_path=extent_dem_render_file,
-                layer_name=maker.EXTENT_DEM_RENDER_LAYER_NAME,
-                layer_style=maker.DEFAULT_TEMPLATE[maker.EXTENT_DEM_RENDER_LAYER_NAME]
-            )
-
-            # 添加地图范围
-            maker.add_layer_to_project(
-                layer_path=map_extent_file,
-                layer_name=maker.MAP_EXTENT_LAYER_NAME,
-                layer_style=maker.DEFAULT_TEMPLATE[maker.MAP_EXTENT_LAYER_NAME]
-            )
-
-            r''''''
-            # 添加天地图图层
-            maker.add_layer_to_project(
-                layer_path=extent_tianditu_file,
-                layer_name=maker.TIANDITU_MAP_LAYER_NAME,
-                #layer_style=maker.DEFAULT_TEMPLATE[maker.GOOGLE_MAP_LAYER_NAME]
-            )
-
-
-            # 添加谷歌地图图层
-            maker.add_layer_to_project(
-                layer_path=extent_google_file,
-                layer_name=maker.GOOGLE_MAP_LAYER_NAME,
-                layer_style=maker.DEFAULT_TEMPLATE[maker.GOOGLE_MAP_LAYER_NAME]
-            )
-
-            # 添加高德地图图层
-            maker.add_layer_to_project(
-                layer_path=extent_gaode_file,
-                layer_name=maker.GAODE_MAP_LAYER_NAME,
-                #layer_style=maker.DEFAULT_TEMPLATE[maker.GAODE_MAP_LAYER_NAME]
-            )
-
-            # 添加等高线图层
-            maker.add_layer_to_project(
-                layer_path=extent_dem_contour_file,
-                layer_name=maker.CONTOUR_LAYER_NAME,
-                layer_style=maker.DEFAULT_TEMPLATE[maker.CONTOUR_LAYER_NAME]
-            )
-
-            # 添加osm
-            maker.add_extent_osm_layers_with_styles(extent_osm_files)
-
-            # 添加夸张的阴影图层
-            maker.add_layer_to_project(
-                layer_path=extent_dem_hillshade_extreme_file,
-                layer_name=maker.EXTENT_DEM_HILLSHADOW_EXAG_LAYER_NAME,
-                layer_style=maker.DEFAULT_TEMPLATE[maker.EXTENT_DEM_HILLSHADOW_EXAG_LAYER_NAME]
-            )
-
-            # 添加阴影图层
-            maker.add_layer_to_project(
-                layer_path=extent_dem_hillshade_file,
-                layer_name=maker.EXTENT_DEM_HILLSHADOW_LAYER_NAME,
-                layer_style=maker.DEFAULT_TEMPLATE[maker.EXTENT_DEM_HILLSHADOW_LAYER_NAME]
-            )
-
-            # 添加轨迹图层
-            if "extent_route_file" in locals():
-                maker.add_layer_to_project(
-                    layer_path=extent_route_file,
-                    layer_name=maker.EXTENT_ROUTE_LAYER_NAME,
-                    layer_style=maker.DEFAULT_TEMPLATE[maker.EXTENT_ROUTE_LAYER_NAME]
-                )
-
-            # 添加特殊标注点图层
-            if "marker_file" in locals():
-                maker.add_layer_to_project(
-                    layer_path=marker_file,
-                    layer_name=maker.EXTENT_MARKER_LAYER_NAME,
-                    layer_style=maker.DEFAULT_TEMPLATE[maker.EXTENT_MARKER_LAYER_NAME]
-                )
-
-            # 添加打印模板-横向 layoutmodel-横向.qpt
-            maker.add_layout_templet(maker.LAYOUT_MODEL_HORIZONTAL, maker.LAYOUT_MODEL_HORIZONTAL_NAME)
-            # 添加打印模板-纵向 layoutmodel-纵向.qpt
-            maker.add_layout_templet(maker.LAYOUT_MODEL_VERTICAL, maker.LAYOUT_MODEL_VERTICAL_NAME)
-
-            # 保存项目
-            print("保存项目...")
-            project_path = maker.save_project()
-
-            print(f"项目已保存到: {project_path}")
-
-            # 导出地图验证 ===========================
-            print("\n=== 开始导出地图验证 ===")
-
-            # OSM地图+等高线+影像地图
-            osm_points_layer = maker.load_vector_layer(maker.EXTENT_OSM_POINTS, maker.EXTENT_OSM_POINTS_LAYER_NAME,maker.DEFAULT_TEMPLATE[maker.EXTENT_OSM_POINTS_LAYER_NAME])
-            osm_lines_layer = maker.load_vector_layer(maker.EXTENT_OSM_LINES, maker.EXTENT_OSM_LINES_LAYER_NAME,maker.DEFAULT_TEMPLATE[maker.EXTENT_OSM_LINES_LAYER_NAME])
-            osm_multipolygons_layer = maker.load_vector_layer(maker.EXTENT_OSM_MULTIPOLYGONS, maker.EXTENT_OSM_MULTIPOLYGONS_LAYER_NAME,maker.DEFAULT_TEMPLATE[maker.EXTENT_OSM_MULTIPOLYGONS_LAYER_NAME])
-
-            if gpx_file_path and os.path.exists(gpx_file_path):
-                route_layer = maker.load_vector_layer(maker.EXTENT_ROUTE_LAYER, maker.EXTENT_ROUTE_LAYER_NAME,maker.DEFAULT_TEMPLATE[maker.EXTENT_ROUTE_LAYER_NAME])
-            else:
-                route_layer = None
-
-            # 特殊标注点图层（列表首位 = 渲染最顶层）
-            if marker_list and os.path.exists(maker.EXTENT_MARKER_LAYER):
-                marker_layer = maker.load_vector_layer(maker.EXTENT_MARKER_LAYER, maker.EXTENT_MARKER_LAYER_NAME,maker.DEFAULT_TEMPLATE[maker.EXTENT_MARKER_LAYER_NAME])
-            else:
-                marker_layer = None
-
-            contour_layer = maker.load_vector_layer(maker.CONTOUR_FILE, maker.CONTOUR_LAYER_NAME,maker.DEFAULT_TEMPLATE[maker.CONTOUR_LAYER_NAME])
-
-            # 优先使用高德地图图层，如果不存在则使用谷歌地图图层，其他情况使用天地图。
-            if os.path.exists(maker.GAODE_MAP):
-                tdt_layer = maker.load_raster_layer(maker.GAODE_MAP, maker.GAODE_MAP_LAYER_NAME,maker.DEFAULT_TEMPLATE[maker.GAODE_MAP_LAYER_NAME])
-            elif os.path.exists(maker.GOOGLE_MAP):
-                tdt_layer = maker.load_raster_layer(maker.GOOGLE_MAP, maker.GOOGLE_MAP_LAYER_NAME,maker.DEFAULT_TEMPLATE[maker.GOOGLE_MAP_LAYER_NAME])
-            else:
-                tdt_layer = maker.load_raster_layer(maker.TDT_MAP, maker.TDT_MAP_LAYER_NAME,maker.DEFAULT_TEMPLATE[maker.TDT_MAP_LAYER_NAME])
-
-            maker.export_map_by_layout_templet(layers_to_show=[marker_layer,
-                contour_layer,
-                route_layer,
-                osm_points_layer,osm_lines_layer,osm_multipolygons_layer,
-                tdt_layer],
-                bg_satellite=maker.BG_SATELLITE_Y,
+            maker.export_print_maps(
                 map_title=map_title,
                 map_maker=map_maker,
                 grid_interval_seconds=grid_interval_seconds,
-                contour_interval=contour_interval
-                )
-
-            # OSM地图+等高线+山体阴影+DEM高程渲染层
-            dem_layer = maker.load_raster_layer(maker.EXTENT_DEM_RENDER_LAYER, maker.EXTENT_DEM_RENDER_LAYER_NAME,maker.DEFAULT_TEMPLATE[maker.EXTENT_DEM_RENDER_LAYER_NAME])
-            # 山体阴影图层
-            #dem_hillshade_layer = maker.load_raster_layer(maker.EXTENT_DEM_HILLSHADOW, maker.EXTENT_DEM_HILLSHADOW_LAYER_NAME,maker.DEFAULT_TEMPLATE[maker.EXTENT_DEM_HILLSHADOW_LAYER_NAME])
-            # 夸张的阴影图层
-            dem_hillshade_layer = maker.load_raster_layer(maker.EXTENT_DEM_HILLSHADOW_EXAG, maker.EXTENT_DEM_HILLSHADOW_EXAG_LAYER_NAME,maker.DEFAULT_TEMPLATE[maker.EXTENT_DEM_HILLSHADOW_EXAG_LAYER_NAME])
-            maker.export_map_by_layout_templet(layers_to_show=[marker_layer,
-                contour_layer,
-                route_layer,
-                osm_points_layer,osm_lines_layer,osm_multipolygons_layer,
-                dem_hillshade_layer,dem_layer],
-                map_title=map_title,
-                map_maker=map_maker,
-                grid_interval_seconds=grid_interval_seconds,
-                contour_interval=contour_interval
-                )
-
-            # 待操作 - OSM地图（定制样式）+等高线+山体阴影+地图范围样式（底色）
-
-            print("\n=== 所有测试完成 ===")
-            return True
+                contour_interval=contour_interval,
+                gpx_file_path=gpx_file_path,
+                marker_list=marker_list
+            )
 
         except Exception as e:
             print(f"工作流执行失败: {e}")
@@ -3447,7 +3499,6 @@ class DemMakeQGISMap:
             traceback.print_exc()
             return False
 
-
 # ===== 向后兼容的模块级别名（老调用点无需修改）=====
 point_to_map = DemMakeQGISMap.point_to_map
 gpx_to_map = DemMakeQGISMap.gpx_to_map
@@ -3537,23 +3588,23 @@ if __name__ == "__main__":
     #23.13323460,113.48018936
     #    东经 113.4765°，北纬 23.2258°
     # 23.224624, 113.470941
-    # DemMakeQGISMap.point_to_map(center_lon=113.470941, center_lat=23.224624, north_south_length=7, east_west_length=7,
-        # project_dir=r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto2026102301",
-        # map_title="2026102301",
-        # map_maker="1121-奀奀的排骨",
-        # grid_interval_seconds=20,
-        # contour_interval=10,
-        # marker_list=[
-            # {"lon": 113.470941, "lat": 23.224624, "name": "基准坐标", "type": "营地"},
+    DemMakeQGISMap.point_to_map(center_lon=113.470941, center_lat=23.224624, north_south_length=7, east_west_length=7,
+        project_dir=r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto2026102301",
+        map_title="2026102301",
+        map_maker="1121-奀奀的排骨",
+        grid_interval_seconds=20,
+        contour_interval=10,
+        marker_list=[
+            {"lon": 113.470941, "lat": 23.224624, "name": "基准坐标", "type": "营地"},
              
-            # {"lon": 113.45165652600731, "lat": 23.231562525614827, "name": "测试A", "type": "营地"},
+            {"lon": 113.45165652600731, "lat": 23.231562525614827, "name": "测试A", "type": "营地"},
             
-            # {"lon": 113.47184096007946, "lat": 23.235454936681286, "name": "测试B", "type": "营地"},
-        # ]
+            {"lon": 113.47184096007946, "lat": 23.235454936681286, "name": "测试B", "type": "营地"},
+        ]
 
 
 
-        # )
+        )
     
 
     r'''
