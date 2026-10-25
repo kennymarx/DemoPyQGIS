@@ -3520,11 +3520,11 @@ def main_point_to_map():
 if __name__ == "__main__":
     # main_point_to_map()
 
-    # point_to_map(center_lon=113.428453, center_lat=23.191103, north_south_length=15, east_west_length=10, 
-    #     project_dir=r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto01", 
+    # DemMakeQGISMap.point_to_map(center_lon=113.428453, center_lat=23.191103, north_south_length=15, east_west_length=10,
+    #     project_dir=r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto01",
     #     gpx_file_path=r"C:\Users\Administrator\Desktop\QGIS\地图制作\火帽北山\2024-03-03 07 57 火北帽.gpx")
     r'''
-    point_to_map(center_lon=113.375531, center_lat=23.243997, north_south_length=5.5, east_west_length=6.5, 
+    DemMakeQGISMap.point_to_map(center_lon=113.375531, center_lat=23.243997, north_south_length=5.5, east_west_length=6.5,
         project_dir=r"C:\Users\Administrator\Desktop\QGIS\地图制作\广州蓝天救援协会大源杓麻训练地图",
         map_title="广州蓝天救援协会大源杓麻训练地图",
         map_maker="1121-奀奀的排骨",
@@ -3537,7 +3537,7 @@ if __name__ == "__main__":
     #23.13323460,113.48018936
     #    东经 113.4765°，北纬 23.2258°
     # 23.224624, 113.470941
-    # point_to_map(center_lon=113.470941, center_lat=23.224624, north_south_length=7, east_west_length=7,
+    # DemMakeQGISMap.point_to_map(center_lon=113.470941, center_lat=23.224624, north_south_length=7, east_west_length=7,
         # project_dir=r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto2026102301",
         # map_title="2026102301",
         # map_maker="1121-奀奀的排骨",
@@ -3557,7 +3557,7 @@ if __name__ == "__main__":
     
 
     r'''
-    gpx_to_map(r"C:\Users\Administrator\Desktop\QGIS\地图制作\新建文件夹\20260918牛头山∽乌石山环线整理-3.gpx", 
+    DemMakeQGISMap.gpx_to_map(r"C:\Users\Administrator\Desktop\QGIS\地图制作\新建文件夹\20260918牛头山∽乌石山环线整理-3.gpx",
        r"C:\Users\Administrator\Desktop\QGIS\地图制作\广州蓝天牛头山巡山路线图3-乌石山环线",
         map_title="广州蓝天牛头山巡山路线图3",
         map_maker="1121-奀奀的排骨")
