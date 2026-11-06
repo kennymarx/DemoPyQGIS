@@ -3371,8 +3371,8 @@ class DemMakeQGISMap:
         return R * c
 
 
-    @staticmethod
-    def _gpx_extent_params(gpx_file_path):
+    @classmethod
+    def _gpx_extent_params(cls, gpx_file_path):
         """
         解析 GPX 轨迹文件，推导地图中心点与边长
 
@@ -3584,12 +3584,15 @@ if __name__ == "__main__":
         print_template="vertical"
         )
     '''
+    
+    
     #=== 以下测试用例已注释禁用（原 r'''''' 是空字符串而非注释，其中调用曾是活代码） ===
     #23.13323460,113.48018936
     #    东经 113.4765°，北纬 23.2258°
     # 23.224624, 113.470941
+    r'''
     DemMakeQGISMap.point_to_map(center_lon=113.470941, center_lat=23.224624, north_south_length=7, east_west_length=7,
-        project_dir=r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto2026102301",
+        project_dir=r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto2026110601",
         map_title="2026102301",
         map_maker="1121-奀奀的排骨",
         grid_interval_seconds=20,
@@ -3601,15 +3604,23 @@ if __name__ == "__main__":
             
             {"lon": 113.47184096007946, "lat": 23.235454936681286, "name": "测试B", "type": "营地"},
         ]
+        )
+    '''
 
-
-
+    r''''''
+    DemMakeQGISMap.gpx_to_map(project_dir=r"C:\Users\Administrator\Desktop\QGIS\地图制作\DemoMakeQGISMapAuto2026110601",
+       gpx_file_path=r"C:\Users\Administrator\Desktop\地图制作\00 地图制作\20261107训练.gpx",
+        map_title="20261107训练",
+        map_maker="1121-奀奀的排骨",
+        grid_interval_seconds=20,
+        contour_interval=10,
+        marker_list = [
+            {"lon": 113.839911, "lat": 23.773453, "name": "起点（温塘肚）", "type": "营地"},
+            {"lon": 113.840719, "lat": 23.753319, "name": "鸡公岩", "type": "营地"},
+            {"lon": 113.847606, "lat": 23.753894, "name": "北线路口", "type": "营地"},
+            {"lon": 113.842997, "lat": 23.750122, "name": "鸡枕山垭口", "type": "营地"},
+            {"lon": 113.831711, "lat": 23.735003, "name": "鸡怎山农庄", "type": "营地"},
+            {"lon": 113.874883, "lat": 23.767075, "name": "古田村", "type": "营地"},
+        ]
         )
     
-
-    r'''
-    DemMakeQGISMap.gpx_to_map(r"C:\Users\Administrator\Desktop\QGIS\地图制作\新建文件夹\20260918牛头山∽乌石山环线整理-3.gpx",
-       r"C:\Users\Administrator\Desktop\QGIS\地图制作\广州蓝天牛头山巡山路线图3-乌石山环线",
-        map_title="广州蓝天牛头山巡山路线图3",
-        map_maker="1121-奀奀的排骨")
-    '''
